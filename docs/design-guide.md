@@ -16,11 +16,10 @@
 
 | 区域 | 风格 | 说明 |
 |------|------|------|
-| 登录页 | 深色 | 整页深蓝渐变 + 网格背景 + 毛玻璃卡片 |
 | MainLayout header / sidebar | 深色 | 深色玻璃外壳，青蓝高亮 |
 | `el-main` 内容区（案件池/工作台/统计/驾驶舱正文） | 浅色 | 保持 Element Plus 默认浅色，保证数据密集页面的可读性 |
 
-> 不要对整站切换 Element Plus dark-mode class。深色仅通过 `.bg-tech-grid` / `.glass-card` 工具类和 scoped 样式，作用在外壳与登录页上。
+> 系统已免登录（无登录页），深色仅用于 MainLayout 外壳。不要对整站切换 Element Plus dark-mode class。深色仅通过 `.bg-tech-grid` / `.glass-card` 工具类和 scoped 样式，作用在外壳上。
 
 ## 3. 设计 Token
 
@@ -69,10 +68,10 @@
 定义在 `frontend/src/styles/global.css`，已全局引入。
 
 ### `.bg-tech-grid`
-深蓝渐变底 + 两处径向光晕 + 细网格线。用于登录页整页背景、MainLayout 外壳背景。
+深蓝渐变底 + 两处径向光晕 + 细网格线。用于 MainLayout 外壳背景。
 
 ### `.glass-card`
-毛玻璃卡片：半透明白底 + `backdrop-filter: blur` + 细边框 + 阴影 + hover 微亮过渡。用于登录卡片、header、sidebar 等深色外壳元素。
+毛玻璃卡片：半透明白底 + `backdrop-filter: blur` + 细边框 + 阴影 + hover 微亮过渡。用于 header、sidebar 等深色外壳元素。
 
 ```
 background: var(--glass-bg);
@@ -87,7 +86,7 @@ box-shadow: var(--shadow-glass);
 ## 5. 组件样式约定
 
 ### 品牌标识
-⚖ 图标（`--accent-cyan` + `drop-shadow` 光晕）+ "智能办案平台"标题（`font-weight: 700`，字间距加宽）。登录页附副标题"劳动人事争议仲裁智能办案平台"。
+⚖ 图标（`--accent-cyan` + `drop-shadow` 光晕）+ "智能办案平台"标题（`font-weight: 700`，字间距加宽），副标题"劳动人事争议仲裁智能办案平台"。
 
 ### 深色外壳里的输入框
 透明背景 + 浅色文字，聚焦时青蓝内描边：
@@ -113,7 +112,6 @@ hover: transform: translateY(-1px); box-shadow: 0 8px 20px rgba(34,211,238,0.3);
 
 ## 6. 参考实现（可直接抄样式的现成文件）
 
-- `frontend/src/views/LoginView.vue` — 登录页（深色外壳 + 毛玻璃卡片 + 输入框/按钮样式）
 - `frontend/src/layouts/MainLayout.vue` — 深色 header + sidebar 外壳，浅色内容区
 - `frontend/src/views/DashboardView.vue` — 浅色内容页里的统计卡片范式
 

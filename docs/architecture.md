@@ -7,7 +7,7 @@
 - `backend/`：FastAPI 应用，按表现层→业务层→AI 服务层→基础服务层→数据层分层。
 - `frontend/`：Vue3 + Vite + TypeScript 单页应用，通过 `/api` 反向代理调用后端。
 
-需求来源见 `智能办案平台需求/`（01～10 号文档），本仓库是其中 07 号《技术沟通说明》所要求分层架构的落地实现。当前阶段只搭建可运行的框架骨架：核心领域模型、案件状态机、AI 能力可插拔接口、四大核心页面骨架均已就位，完整仲裁业务规则和真实 LLM 接入留待后续迭代。
+需求来源见 `智能办案平台需求/`（01～10 号文档），本仓库是其中 07 号《技术沟通说明》所要求分层架构的落地实现。案件总览驾驶舱、内网案件监控与同步、统计分析、时限设置、预登记案件等模块已上线运行；AI 能力层仍为可插拔的 mock 实现，真实 LLM 接入留待后续迭代。
 
 ## 后端分层
 
@@ -25,13 +25,13 @@
 - `app/main.py`：FastAPI 应用入口，注册 CORS 中间件和 `api_router`。
 - `app/core/`：配置（`config.py`，pydantic-settings）、JWT/密码哈希（`security.py`）、RBAC 权限依赖（`permissions.py`）。
 - `app/db/`：`base.py`（Declarative Base）、`session.py`（异步引擎/会话，`get_db` 依赖）。
-- `app/models/`：`User`/`Case`/`Party`/`Evidence`/`Document`/`CaseTimelineEvent`/`AIOutput`/`ServiceDelivery`/`AIModelConfig`/`InternalCaseTracking`（+`CaseTimeLimitOverride`/`CaseServiceConfirmation`）。
+- `app/models/`：`User`/`Case`/`Party`/`Evidence`/`Document`/`CaseTimelineEvent`/`AIOutput`/`ServiceDelivery`/`AIModelConfig`/`SystemSetting`/`InternalCaseTracking`/`CaseTimeLimitOverride`/`SyncVerificationReport`（`CaseServiceConfirmation` 已随结案即终态的设计下线并删表）。
 - `app/schemas/`：Pydantic 请求/响应模型，按模块拆分，与 ORM 模型解耦。
 - `app/repositories/`：纯数据访问（如 `case_repository.py`），不做状态校验。
 - `app/services/`：业务规则，例如 `case_lifecycle.py` 的状态机、`timeline_service.py` 的统一时间线写入、`internal_case_sync.py` 的内网案件全量同步、`internal_case_urgency.py` 的紧急度纯函数。
 - `app/integrations/`：外部系统对接，目前只有 `case_system/`（内网案件系统 10.96.10.78:8080 的登录/token 缓存客户端与统计服务）。
 - `app/ai/`：AI 能力层，`base.py` 定义统一输出结构 `AIResult` 与 `AICapability` 抽象基类；`client.py` 封装 LLM Provider（当前为 `MockLLMClient`，未来接入真实模型只需替换该文件，上层能力类和业务代码不受影响）。
-- `app/api/v1/`：路由层，按模块拆分（`auth`/`dashboard`/`cases`/`case_portrait`/`timeline`/`ai`/`documents`/`service_delivery`/`stats`），统一经 `router.py` 汇总。
+- `app/api/v1/`：路由层，按模块拆分（`auth`/`dashboard`/`cases`/`case_portrait`/`timeline`/`ai`/`ai_models`/`documents`/`service_delivery`/`stats`/`internal_cases`/`settings`/`virtual_cases`），统一经 `router.py` 汇总。
 
 ## 关键设计
 
@@ -54,22 +54,27 @@
 ```text
 frontend/src/
 ├── main.ts / App.vue         应用入口
-├── router/index.ts           路由：/login /dashboard /priority /cases/:id /stats /models
+├── router/index.ts           路由：/dashboard /priority /cases/:id /stats /time-limits /virtual-cases /models（免登录，无 /login）
 ├── stores/                   Pinia：case.ts（案件工作台状态）
-├── api/                      axios 封装，按模块拆分（auth/dashboard/case/internalCase/ai/aiModel/stats）
+├── api/                      axios 封装，按模块拆分（auth/dashboard/case/internalCase/ai/aiModel/stats/settings/virtualCases）
 ├── layouts/MainLayout.vue    顶部信息栏 + 侧边导航
 ├── views/
-│   ├── LoginView.vue
 │   ├── DashboardView.vue     首页驾驶舱：待办案件/近日开庭/风险提醒等统计卡片（近日开庭卡片可点开看明细）
-│   ├── CasePriorityView.vue  办案进度监控：内网案件监控（环节/紧急度筛选、确认送达、时效覆盖）
+│   ├── CasePriorityView.vue  办案进度监控：内网案件监控（环节/紧急度筛选、时效覆盖、一致性校验）
 │   ├── CaseWorkspaceView.vue 案件工作台：左画像/中当前阶段工作区/右 AI 助手/底部时间线
 │   ├── StatsView.vue         统计分析
+│   ├── SettingsView.vue      时限设置
+│   ├── VirtualCasesView.vue  预登记案件
 │   └── ModelManageView.vue   AI 模型配置管理
-└── components/case/
-    ├── CasePortrait.vue      案件画像
-    ├── CaseTimeline.vue      案件时间线
-    ├── AIAssistantPanel.vue  AI 助手（触发能力、展示结构化建议、人工确认）
-    └── stage/*.vue           收件/调解/庭前/庭审/裁决/送达 各阶段工作区骨架
+└── components/
+    ├── DashboardCharts.vue   总览四张图表（echarts）
+    ├── InternalCaseDialog.vue 案件明细弹窗（总览卡片/图表、统计页共用）
+    ├── YearlyStatsPanel.vue  总览年度数据区
+    └── case/
+        ├── CasePortrait.vue      案件画像
+        ├── CaseTimeline.vue      案件时间线
+        ├── AIAssistantPanel.vue  AI 助手（触发能力、展示结构化建议、人工确认）
+        └── stage/*.vue           收件/调解/庭前/庭审/裁决/送达 各阶段工作区骨架
 ```
 
 `CaseWorkspaceView.vue` 根据案件当前 `status` 动态选择 `stage/` 下对应阶段组件渲染，四大核心区块（画像/阶段工作区/AI 助手/时间线）在同一页面组合展示。
