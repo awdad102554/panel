@@ -1,0 +1,30 @@
+/* 全局放大 10%:工作人员习惯 110% 浏览器缩放的观感(2026-07-31 确认),
+   用 zoom 整体放大字体/卡片/图表/弹窗,免去逐处调字号。Chromium、Firefox 126+ 支持。 */
+body {
+  zoom: 1.1;
+}
+
+.bg-tech-grid {
+  background-color: var(--bg-deep);
+  background-image:
+    radial-gradient(circle at 15% 10%, rgba(59, 130, 246, 0.22), transparent 45%),
+    radial-gradient(circle at 85% 80%, rgba(34, 211, 238, 0.16), transparent 45%),
+    linear-gradient(160deg, var(--bg-deep) 0%, var(--bg-deep-2) 100%),
+    repeating-linear-gradient(0deg, var(--bg-grid-line) 0, var(--bg-grid-line) 1px, transparent 1px, transparent 40px),
+    repeating-linear-gradient(90deg, var(--bg-grid-line) 0, var(--bg-grid-line) 1px, transparent 1px, transparent 40px);
+  background-blend-mode: normal, normal, normal, overlay, overlay;
+}
+
+.glass-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-glass);
+  transition: background 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.glass-card:hover {
+  background: var(--glass-bg-hover);
+}

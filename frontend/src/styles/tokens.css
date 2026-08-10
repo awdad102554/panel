@@ -1,0 +1,28 @@
+:root {
+  /* 背景 */
+  --bg-deep: #0a1330;
+  --bg-deep-2: #0f1f4a;
+  --bg-grid-line: rgba(255, 255, 255, 0.04);
+
+  /* 玻璃卡片 */
+  --glass-bg: rgba(255, 255, 255, 0.06);
+  --glass-bg-hover: rgba(255, 255, 255, 0.09);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-blur: 16px;
+
+  /* 科技高亮色 */
+  --accent-cyan: #22d3ee;
+  --accent-blue: #3b82f6;
+  --accent-amber: #f59e0b;
+  --accent-red: #f87171;
+  --accent-green: #34d399;
+
+  /* 文字 */
+  --text-primary: #e6ebfa;
+  --text-secondary: #93a0c4;
+
+  /* 圆角/阴影 */
+  --radius-lg: 16px;
+  --radius-md: 10px;
+  --shadow-glass: 0 8px 32px rgba(0, 0, 0, 0.35);
+}

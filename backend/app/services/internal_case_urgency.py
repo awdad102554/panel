@@ -1,0 +1,202 @@
+"""内网案件紧急度计算(纯函数,读取时按当前日期实时计算,不落库)。
+
+优先级:人工时效覆盖 > 环节原生倒计时/超期信号 > 按进入当前环节的天数估算。
+已确认口径(工作人员 2026-07-24 确认;2026-07-30 取消结案后的送达跟踪,结案即终态):
+- 审理中止(is_paused)标"已中止XX天";暂停超过 case_urgency_paused_alert_days
+  升级为 paused_overdue 单独提醒(days_remaining 存已中止天数,供前端显示)。
+- 已结案 = 终态,直接按 closed 处理(默认隐藏),不再跟踪结案后的送达环节;
+  已归档同为终态。
+- 未通过/退回状态(结案审核未通过/结案审批未通过/处理文书审批未通过)意味着要
+  返工,按最高优先级红色 overdue 提醒。
+- 组织调解:进入调解环节超过 case_mediation_alert_days 天(约一个月)提醒(soon)。
+- reserve/receive.status 枚举:0 待审核(工作人员待办,按天数监控)/ 其余=已处理,
+  单列 rejected 默认隐藏。收件超期按红色 overdue 提醒。
+- current_step 枚举不封闭,未识别的子状态按普通 handle 在办处理,不报错。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
+
+from app.core.config import Settings
+from app.models.internal_case import (
+    CaseTimeLimitOverride,
+    InternalCaseTracking,
+    InternalStage,
+)
+
+# 业务本地时区(CST):天数以本地自然日为准,不用 UTC 日期。
+_LOCAL_TZ = timezone(timedelta(hours=8))
+
+CLOSED_STEP = "已结案"
+ARCHIVED_STEP = "已归档"  # 已归档:比结案更终态,直接按 closed 隐藏。
+PAUSED_STEP = "审理中止"
+MEDIATION_STEP = "组织调解"
+DECIDING_STEP = "仲裁裁决中"  # 已开庭、等待裁决(案件总览"已开庭待裁决"的口径)
+# 未通过/退回状态:需要返工,红色 overdue 级提醒。
+REWORK_STEPS = frozenset({"结案审核未通过", "结案审批未通过", "处理文书审批未通过"})
+
+# 紧急度枚举(与前端 InternalCaseUrgency 对应)。
+UrgencyLevel = str  # "overdue"|"urgent"|"soon"|"normal"|"paused"|"paused_overdue"|"closed"|"rejected"
+
+# 列表排序权重:数字越小越靠前。中止过久只是"停滞提醒"(2026-07-31 确认),
+# 不属于高紧急度,排在正常之后;中止过久案件另有总览单独卡片展示。
+_URGENCY_ORDER = {
+    "overdue": 0,
+    "urgent": 1,
+    "soon": 2,
+    "normal": 3,
+    "paused_overdue": 4,
+    "paused": 5,
+    "closed": 6,
+    "rejected": 7,
+}
+
+
+@dataclass
+class UrgencyResult:
+    urgency: UrgencyLevel
+    days_remaining: int | None  # 负数=已超期;None=无倒计时口径
+    source: str  # "override" | "native" | "elapsed" | "status"
+
+    @property
+    def order(self) -> int:
+        return _URGENCY_ORDER.get(self.urgency, 99)
+
+
+def urgency_order(level: str) -> int:
+    """紧急度排序权重(供列表混排,数字越小越靠前)。"""
+    return _URGENCY_ORDER.get(level, 99)
+
+
+def _by_days(days_remaining: int, soon_days: int, urgent_days: int = 1) -> UrgencyLevel:
+    """按剩余天数分档:超期 < 紧急(≤urgent_days) < 临近(≤soon_days) < 正常。"""
+    if days_remaining < 0:
+        return "overdue"
+    if days_remaining <= urgent_days:
+        return "urgent"
+    if days_remaining <= soon_days:
+        return "soon"
+    return "normal"
+
+
+def compute_urgency(
+    row: InternalCaseTracking,
+    override: CaseTimeLimitOverride | None,
+    settings: Settings,
+    today: date | None = None,
+) -> UrgencyResult:
+    # 默认"今天"用业务本地日期(CST),与 _as_date 的口径一致;服务器系统时区不是
+    # CST 时,UTC/CST 日界前后(0:00-8:00)不至于把天数算偏 1 天。
+    today = today or datetime.now(_LOCAL_TZ).date()
+
+    # 1. 人工时效覆盖优先。
+    if override is not None:
+        days = (override.deadline_override - today).days
+        return UrgencyResult(_by_days(days, settings.case_urgency_soon_days, settings.case_urgency_urgent_days), days, "override")
+
+    # stage 列显式声明为 String,从库中读回是 str 而非枚举,故用 == 而非 is 比较。
+    if row.stage == InternalStage.HANDLE:
+        # 2a. 已结案/已归档:终态,不参与任何提醒(结案后的送达环节不再跟踪)。
+        if row.current_step in (CLOSED_STEP, ARCHIVED_STEP):
+            return UrgencyResult("closed", None, "status")
+        # 2b. 未通过/退回状态:需要返工,红色 overdue 级最高优先。
+        if row.current_step in REWORK_STEPS:
+            return UrgencyResult("overdue", None, "status")
+        # 2c. 审理中止:标"已中止XX天";暂停超过阈值升级为 paused_overdue 提醒。
+        # days_remaining 存"已中止天数"(正数),供前端显示"中止XX天"。
+        if row.is_paused or row.current_step == PAUSED_STEP:
+            paused_days = (today - _as_date(row.phase_entered_at)).days
+            if paused_days > settings.case_urgency_paused_alert_days:
+                return UrgencyResult("paused_overdue", paused_days, "elapsed")
+            return UrgencyResult("paused", paused_days, "elapsed")
+        # 2d. 组织调解:无原生时限,进入调解环节超过约一个月提醒。
+        # days_remaining 传 None:调解没有"剩余天数"概念,传负数前端会误显"已超期 X 天"。
+        if row.current_step == MEDIATION_STEP:
+            mediation_days = (today - _as_date(row.phase_entered_at)).days
+            if mediation_days > settings.case_mediation_alert_days:
+                return UrgencyResult("soon", None, "elapsed")
+            return UrgencyResult("normal", settings.case_mediation_alert_days - mediation_days, "elapsed")
+        # 2e. 普通在办:用原生剩余审理天数。
+        if row.native_remaining_days is not None:
+            return UrgencyResult(
+                _by_days(row.native_remaining_days, settings.case_urgency_soon_days, settings.case_urgency_urgent_days),
+                row.native_remaining_days,
+                "native",
+            )
+        # 没有 closing_time_limit 的在办案件,按进入环节天数兜底(估算时限=临近阈值)。
+        return _elapsed_urgency(
+            row, today, settings.case_urgency_soon_days,
+            settings.case_urgency_soon_days, settings.case_urgency_urgent_days,
+        )
+
+    if row.stage == InternalStage.RESERVE:
+        # reserve.status 枚举(用户确认的权威口径):0 待审核 / 1 审核通过 /
+        # 2 审核不通过 / 3 现场确认通过 / 4 现场确认不通过。
+        # 不通过(2/4)是退回申请人补正,不是工作人员待办,单列 rejected 不算超期;
+        # 通过(1/3)表示 reserve 环节工作人员的动作已完成,不告警;
+        # 待审核(0)才是工作人员该推进的,按原生 overdue_days / 进入天数估算。
+        reserve_status = (row.raw_payload or {}).get("status")
+        if reserve_status in (2, 4):
+            return UrgencyResult("rejected", None, "status")
+        if reserve_status in (1, 3):
+            return UrgencyResult("normal", None, "status")
+        # 预约:overdue_days>0 转成的负数直接判超期,否则按进入天数估算。
+        if row.native_remaining_days is not None and row.native_remaining_days < 0:
+            return UrgencyResult("overdue", row.native_remaining_days, "native")
+        return _elapsed_urgency(
+            row, today, settings.case_urgency_reserve_days,
+            settings.case_urgency_soon_days, settings.case_urgency_urgent_days,
+        )
+
+    # 4. 收件:status 与 reserve 同一套口径——0 待审核(工作人员待办)才监控,
+    # 3/4=审核/现场确认已完成、2=不同意退回,都是已处理,单列 rejected 默认隐藏,
+    # 不再按 receive_at 计算天数(否则早年审结的老收件会永远挂在列表里报"临近")。
+    receive_status = (row.raw_payload or {}).get("status")
+    if receive_status is not None and receive_status != 0:
+        return UrgencyResult("rejected", None, "status")
+    # 待审核:用内网原生 receive_time_limit(解析成的 native_remaining_days),
+    # 警告分档与在办案件同一套阈值(临近/紧急),超时限红色 overdue 提醒。
+    if row.native_remaining_days is not None:
+        return UrgencyResult(
+            _by_days(row.native_remaining_days, settings.case_urgency_soon_days, settings.case_urgency_urgent_days),
+            row.native_remaining_days,
+            "native",
+        )
+    return _elapsed_urgency(
+        row, today, settings.case_urgency_receive_days,
+        settings.case_urgency_soon_days, settings.case_urgency_urgent_days,
+    )
+
+
+def _elapsed_urgency(
+    row: InternalCaseTracking,
+    today: date,
+    limit_days: int,
+    soon_days: int,
+    urgent_days: int = 1,
+) -> UrgencyResult:
+    """按"进入当前环节已过天数 vs 环节时限"估算紧急度。
+
+    剩余 = 环节时限(limit_days) - 已过天数;警告分档统一用临近/紧急阈值:
+    剩余<0 超期、≤紧急阈值 紧急、≤临近阈值 临近、否则正常。
+    环节的法定时限(收件 5 天、预约 3 天)只决定超期点,不决定警告起点——
+    否则新案件一进来剩 5 天就会被误标"临近"(2026-08-06 修正的口径错位)。
+    """
+    elapsed = (today - _as_date(row.phase_entered_at)).days
+    remaining = limit_days - elapsed
+    return UrgencyResult(_by_days(remaining, soon_days, urgent_days), remaining, "elapsed")
+
+
+def _as_date(value: datetime) -> date:
+    """取业务本地日期(CST)。
+
+    快照里的时间戳是带时区的 UTC,直接 .date() 会得到 UTC 日期,
+    在 UTC 日界前后与本地日期相差一天,使天数计算偏 1 天。
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(_LOCAL_TZ).date()
+        return value.date()
+    return value

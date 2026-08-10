@@ -1,0 +1,19 @@
+"""2026-07-31 起系统免登录:所有接口以内置默认用户身份直接访问(内网环境、无需账号体系)。
+
+如需恢复登录,还原此文件为 OAuth2 token 校验版本,并恢复前端登录页/路由守卫。
+权限角色固定为管理员,require_permission 全部放行;写操作留痕的 username 为 admin。
+"""
+
+from app.models.user import Role, User
+
+# 内置默认用户(不查库):写操作留痕使用其 username。
+_DEFAULT_USER = User(
+    username="admin",
+    display_name="系统用户",
+    hashed_password="",
+    role=Role.ADMIN,
+)
+
+
+async def get_current_user() -> User:
+    return _DEFAULT_USER
