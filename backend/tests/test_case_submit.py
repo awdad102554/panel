@@ -292,6 +292,23 @@ def test_compose_facts_and_overrides():
     assert "因被申请人拖欠工资。" in fr2["content"]
 
 
+def test_worker_flags():
+    """农民工/三期女职工开关作用于全部申请人,默认 0(否)。"""
+    spec = SubmitSpec(
+        apply_at=date(2026, 5, 20),
+        case_reason="经济补偿争议",
+        is_migrant_worker=1,
+        is_three_woman_worker=1,
+        requests=[RequestSpec(text="x", path_ids=[1, 26, 28], option="解除劳动合同的经济补偿", object=1)],
+    )
+    person = build_payload(CASE, spec, CATALOG)["personals"][0]
+    assert person["is_migrant_worker"] == 1
+    assert person["is_three_woman_worker"] == 1
+    default = build_payload(CASE, SPEC, CATALOG)["personals"][0]
+    assert default["is_migrant_worker"] == 0
+    assert default["is_three_woman_worker"] == 0
+
+
 def test_validate_case():
     errors, warnings = validate_case(CASE)
     assert errors == []

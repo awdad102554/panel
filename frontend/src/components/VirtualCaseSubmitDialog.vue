@@ -28,6 +28,8 @@ const form = ref({
   is_pay_social_insurance: 1,
   is_easy: 1,
   company_nature: "私营企业",
+  is_migrant_worker: 0,
+  is_three_woman_worker: 0,
   fact_content: "",
 });
 const mainCauseSelected = ref<string[]>([]);
@@ -63,6 +65,8 @@ watch(
         is_pay_social_insurance: d.defaults.is_pay_social_insurance,
         is_easy: d.defaults.is_easy,
         company_nature: d.defaults.company_nature,
+        is_migrant_worker: d.defaults.is_migrant_worker,
+        is_three_woman_worker: d.defaults.is_three_woman_worker,
         fact_content: d.fact_content,
       };
       mainCauseSelected.value = [];
@@ -163,6 +167,8 @@ function buildSpec(): SubmitSpec {
     is_pay_social_insurance: form.value.is_pay_social_insurance,
     is_easy: form.value.is_easy,
     company_nature: form.value.company_nature,
+    is_migrant_worker: form.value.is_migrant_worker,
+    is_three_woman_worker: form.value.is_three_woman_worker,
     main_causes: [
       ...mainCauseSelected.value,
       ...(mainCauseOther.value.trim() ? [mainCauseOther.value.trim()] : []),
@@ -333,6 +339,26 @@ const companyFillText = computed(() => {
             <label>简易案件</label>
             <el-switch
               v-model="form.is_easy"
+              :active-value="1"
+              :inactive-value="0"
+              active-text="是"
+              inactive-text="否"
+            />
+          </div>
+          <div class="field">
+            <label>农民工(申请人)</label>
+            <el-switch
+              v-model="form.is_migrant_worker"
+              :active-value="1"
+              :inactive-value="0"
+              active-text="是"
+              inactive-text="否"
+            />
+          </div>
+          <div class="field">
+            <label>三期女职工(申请人)</label>
+            <el-switch
+              v-model="form.is_three_woman_worker"
               :active-value="1"
               :inactive-value="0"
               active-text="是"

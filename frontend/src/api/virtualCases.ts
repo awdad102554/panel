@@ -126,6 +126,8 @@ export interface SubmitDraft {
     is_pay_social_insurance: number;
     is_easy: number;
     company_nature: string;
+    is_migrant_worker: number;
+    is_three_woman_worker: number;
     position: { Id: number; name: string }[];
   };
   requests: SubmitDraftRequest[];
@@ -171,6 +173,8 @@ export interface SubmitSpec {
   is_pay_social_insurance: number;
   is_easy: number;
   company_nature: string;
+  is_migrant_worker: number;
+  is_three_woman_worker: number;
   main_causes: string[];
   fact_content: string | null;
   requests: RequestSpec[];

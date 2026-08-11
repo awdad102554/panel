@@ -174,6 +174,8 @@ class SubmitSpec(BaseModel):
     is_pay_social_insurance: int = 1
     is_easy: int = 1  # 是否简易案件(样例1小额=1/样例2工伤20万=0,规则不明,界面可改)
     company_nature: str = DEFAULT_COMPANY_NATURE
+    is_migrant_worker: int = 0  # 农民工标志(作用于全部申请人;内网默认否)
+    is_three_woman_worker: int = 0  # 三期女职工标志(同上)
     # 主要原因(进 fact_reason.main_cause 与事实理由"因…"段):预设文本原样,
     # 非预设视为"其他"自定义文本(内网结构 [None, 自定义],样例1)。
     main_causes: list[str] = []
@@ -407,11 +409,11 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
                 "sex": p.get("gender") or "男",
                 "nation": p.get("ethnicity") or "汉族",
                 "birth": _to_date_str(p.get("birth_date")),
-                "is_migrant_worker": 0,
+                "is_migrant_worker": spec.is_migrant_worker,
                 "id_type": DEFAULT_ID_TYPE,
                 "id_number": p.get("id_number"),
                 "mobile": p.get("phone"),
-                "is_three_woman_worker": 0,
+                "is_three_woman_worker": spec.is_three_woman_worker,
                 "registered_permanent_residence": p.get("address"),
                 "role": 1,
                 "related_user_type": 1,
@@ -667,6 +669,8 @@ async def build_draft(case: dict) -> dict:
             "is_pay_social_insurance": 1,
             "is_easy": 1,
             "company_nature": DEFAULT_COMPANY_NATURE,
+            "is_migrant_worker": 0,
+            "is_three_woman_worker": 0,
             "position": DEFAULT_POSITION,
         },
         "requests": requests_draft,
