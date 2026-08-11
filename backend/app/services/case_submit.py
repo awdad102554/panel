@@ -174,6 +174,7 @@ class SubmitSpec(BaseModel):
     is_pay_social_insurance: int = 1
     is_easy: int = 1  # 是否简易案件(样例1小额=1/样例2工伤20万=0,规则不明,界面可改)
     company_nature: str = DEFAULT_COMPANY_NATURE
+    id_type: str = DEFAULT_ID_TYPE  # 申请人证件类型(字典 worker_id_type,默认居民身份证)
     is_migrant_worker: int = 0  # 农民工标志(作用于全部申请人;内网默认否)
     is_three_woman_worker: int = 0  # 三期女职工标志(同上)
     # 主要原因(进 fact_reason.main_cause 与事实理由"因…"段):预设文本原样,
@@ -410,7 +411,7 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
                 "nation": p.get("ethnicity") or "汉族",
                 "birth": _to_date_str(p.get("birth_date")),
                 "is_migrant_worker": spec.is_migrant_worker,
-                "id_type": DEFAULT_ID_TYPE,
+                "id_type": spec.id_type,
                 "id_number": p.get("id_number"),
                 "mobile": p.get("phone"),
                 "is_three_woman_worker": spec.is_three_woman_worker,
@@ -596,11 +597,12 @@ async def _fill_company_info(applicants: list[dict], respondents: list[dict]) ->
 
 async def build_draft(case: dict) -> dict:
     """submit-draft:自动猜测 + 企业信息回填 + 校验,供前端对话框展示/修改。"""
-    catalog, towns, case_reasons, company_natures = await asyncio.gather(
+    catalog, towns, case_reasons, company_natures, worker_id_types = await asyncio.gather(
         get_request_catalog(),
         get_towns(),
         get_norm_dict("case_reason"),
         get_norm_dict("company_nature"),
+        get_norm_dict("worker_id_type"),
     )
     applicants = [dict(p) for p in case.get("applicants") or []]
     respondents = [dict(p) for p in case.get("respondents") or []]
@@ -669,6 +671,7 @@ async def build_draft(case: dict) -> dict:
             "is_pay_social_insurance": 1,
             "is_easy": 1,
             "company_nature": DEFAULT_COMPANY_NATURE,
+            "id_type": DEFAULT_ID_TYPE,
             "is_migrant_worker": 0,
             "is_three_woman_worker": 0,
             "position": DEFAULT_POSITION,
@@ -689,6 +692,7 @@ async def build_draft(case: dict) -> dict:
             "towns": towns,
             "case_reasons": dict_names,
             "company_natures": [d["name"] for d in company_natures],
+            "worker_id_types": [d["name"] for d in worker_id_types],
             "catalog": catalog,
             "main_cause_presets": MAIN_CAUSE_PRESETS,
         },

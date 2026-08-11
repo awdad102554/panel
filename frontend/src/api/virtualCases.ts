@@ -126,6 +126,7 @@ export interface SubmitDraft {
     is_pay_social_insurance: number;
     is_easy: number;
     company_nature: string;
+    id_type: string;
     is_migrant_worker: number;
     is_three_woman_worker: number;
     position: { Id: number; name: string }[];
@@ -146,6 +147,7 @@ export interface SubmitDraft {
     towns: { town_id: number; town_name: string }[];
     case_reasons: string[];
     company_natures: string[];
+    worker_id_types: string[];
     catalog: CatalogItem[];
     main_cause_presets: string[];
   };
@@ -173,6 +175,7 @@ export interface SubmitSpec {
   is_pay_social_insurance: number;
   is_easy: number;
   company_nature: string;
+  id_type: string;
   is_migrant_worker: number;
   is_three_woman_worker: number;
   main_causes: string[];

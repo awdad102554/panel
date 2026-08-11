@@ -28,6 +28,7 @@ const form = ref({
   is_pay_social_insurance: 1,
   is_easy: 1,
   company_nature: "私营企业",
+  id_type: "居民身份证（户口簿）",
   is_migrant_worker: 0,
   is_three_woman_worker: 0,
   fact_content: "",
@@ -65,6 +66,7 @@ watch(
         is_pay_social_insurance: d.defaults.is_pay_social_insurance,
         is_easy: d.defaults.is_easy,
         company_nature: d.defaults.company_nature,
+        id_type: d.defaults.id_type,
         is_migrant_worker: d.defaults.is_migrant_worker,
         is_three_woman_worker: d.defaults.is_three_woman_worker,
         fact_content: d.fact_content,
@@ -167,6 +169,7 @@ function buildSpec(): SubmitSpec {
     is_pay_social_insurance: form.value.is_pay_social_insurance,
     is_easy: form.value.is_easy,
     company_nature: form.value.company_nature,
+    id_type: form.value.id_type,
     is_migrant_worker: form.value.is_migrant_worker,
     is_three_woman_worker: form.value.is_three_woman_worker,
     main_causes: [
@@ -313,6 +316,12 @@ const companyFillText = computed(() => {
             <label>企业性质</label>
             <el-select v-model="form.company_nature" filterable>
               <el-option v-for="n in draft.meta.company_natures" :key="n" :label="n" :value="n" />
+            </el-select>
+          </div>
+          <div class="field">
+            <label>申请人证件类型</label>
+            <el-select v-model="form.id_type" filterable>
+              <el-option v-for="t in draft.meta.worker_id_types" :key="t" :label="t" :value="t" />
             </el-select>
           </div>
           <div class="field">
