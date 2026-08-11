@@ -26,6 +26,7 @@ const form = ref({
   case_reason: "",
   is_sign_labor_contract: 1,
   is_pay_social_insurance: 1,
+  is_easy: 1,
   company_nature: "私营企业",
 });
 interface RequestRow {
@@ -33,6 +34,7 @@ interface RequestRow {
   path: number[]; // cascader 绑定
   option: string | null;
   object: number | null;
+  items: { name: string; object: number | null }[]; // 多选项($str 模板)明细
   intro: string | null;
   guessed: boolean;
 }
@@ -56,6 +58,7 @@ watch(
         case_reason: d.defaults.case_reason,
         is_sign_labor_contract: d.defaults.is_sign_labor_contract,
         is_pay_social_insurance: d.defaults.is_pay_social_insurance,
+        is_easy: d.defaults.is_easy,
         company_nature: d.defaults.company_nature,
       };
       requestRows.value = d.requests.map((r) => ({
@@ -63,6 +66,7 @@ watch(
         path: r.path_ids ? [...r.path_ids] : [],
         option: r.option,
         object: r.object,
+        items: [],
         intro: r.intro,
         guessed: r.guessed,
       }));
@@ -111,12 +115,28 @@ function optionsOf(row: RequestRow): string[] {
   return catalogItemOf(row.path)?.options ?? [];
 }
 
+// $str 模板(如工伤保险待遇)需要多选项+逐项金额,金额合计自动求和。
+function isMulti(row: RequestRow): boolean {
+  return (catalogItemOf(row.path)?.template ?? "").includes("$str");
+}
+
+function onItemsChange(row: RequestRow, names: string[]) {
+  const old = new Map(row.items.map((i) => [i.name, i.object]));
+  row.items = names.map((n) => ({ name: n, object: old.get(n) ?? null }));
+}
+
+function itemsSum(row: RequestRow): number | null {
+  if (!row.items.length || row.items.some((i) => i.object == null)) return null;
+  return row.items.reduce((acc, i) => acc + (i.object ?? 0), 0);
+}
+
 function onPathChange(row: RequestRow) {
   // 换了类型后,原第四级选项大概率不再适用,清空重选。
   const item = catalogItemOf(row.path);
   if (row.option && !(item?.options ?? []).includes(row.option)) {
     row.option = null;
   }
+  row.items = [];
 }
 
 const canSubmit = computed(
@@ -135,14 +155,19 @@ function buildSpec(): SubmitSpec {
     case_reason: form.value.case_reason,
     is_sign_labor_contract: form.value.is_sign_labor_contract,
     is_pay_social_insurance: form.value.is_pay_social_insurance,
+    is_easy: form.value.is_easy,
     company_nature: form.value.company_nature,
-    requests: requestRows.value.map((r) => ({
-      text: r.text,
-      path_ids: r.path,
-      option: r.option || null,
-      object: r.object ?? null,
-      intro: r.intro?.trim() || null,
-    })),
+    requests: requestRows.value.map((r) => {
+      const multi = isMulti(r);
+      return {
+        text: r.text,
+        path_ids: r.path,
+        option: multi ? null : r.option || null,
+        object: multi ? itemsSum(r) : r.object ?? null,
+        items: multi ? r.items : [],
+        intro: r.intro?.trim() || null,
+      };
+    }),
   };
 }
 
@@ -260,6 +285,16 @@ const companyFillText = computed(() => {
               inactive-text="否"
             />
           </div>
+          <div class="field">
+            <label>简易案件</label>
+            <el-switch
+              v-model="form.is_easy"
+              :active-value="1"
+              :inactive-value="0"
+              active-text="是"
+              inactive-text="否"
+            />
+          </div>
         </div>
 
         <div class="section-title">仲裁请求(自动匹配的类型请逐条确认)</div>
@@ -277,24 +312,52 @@ const companyFillText = computed(() => {
               style="width: 340px"
               @change="onPathChange(r)"
             />
-            <el-select
-              v-model="r.option"
-              clearable
-              filterable
-              placeholder="第四级选项"
-              style="width: 260px"
-              :disabled="!optionsOf(r).length"
-            >
-              <el-option v-for="o in optionsOf(r)" :key="o" :label="o" :value="o" />
-            </el-select>
-            <el-input-number
-              v-model="r.object"
-              :min="0"
-              :precision="2"
-              :controls="false"
-              placeholder="金额(元)"
-              style="width: 140px"
-            />
+            <template v-if="isMulti(r)">
+              <el-select
+                :model-value="r.items.map((i) => i.name)"
+                multiple
+                filterable
+                placeholder="费用项(可多选)"
+                style="width: 320px"
+                @update:model-value="onItemsChange(r, $event)"
+              >
+                <el-option v-for="o in optionsOf(r)" :key="o" :label="o" :value="o" />
+              </el-select>
+              <span class="sum-hint">合计: {{ itemsSum(r) ?? "—" }} 元</span>
+            </template>
+            <template v-else>
+              <el-select
+                v-model="r.option"
+                clearable
+                filterable
+                placeholder="第四级选项"
+                style="width: 260px"
+                :disabled="!optionsOf(r).length"
+              >
+                <el-option v-for="o in optionsOf(r)" :key="o" :label="o" :value="o" />
+              </el-select>
+              <el-input-number
+                v-model="r.object"
+                :min="0"
+                :precision="2"
+                :controls="false"
+                placeholder="金额(元)"
+                style="width: 140px"
+              />
+            </template>
+          </div>
+          <div v-if="isMulti(r) && r.items.length" class="items-amounts">
+            <div v-for="(it, iIdx) in r.items" :key="it.name" class="item-amount">
+              <span class="item-name">{{ iIdx + 1 }}. {{ it.name }}</span>
+              <el-input-number
+                v-model="it.object"
+                :min="0"
+                :precision="2"
+                :controls="false"
+                placeholder="金额(元)"
+                style="width: 140px"
+              />
+            </div>
           </div>
           <el-input
             v-model="r.intro"
@@ -375,6 +438,31 @@ const companyFillText = computed(() => {
 
 .intro-input {
   font-size: 13px;
+}
+
+.sum-hint {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  align-self: center;
+}
+
+.items-amounts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 16px;
+  margin-bottom: 8px;
+}
+
+.item-amount {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.item-name {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  flex: 1;
 }
 
 .hint {

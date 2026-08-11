@@ -134,13 +134,24 @@ SUBMIT_PATH = "/v1/api/admin/arb/receive/add"
 # ---------------------------------------------------------------- 输入模型
 
 
+class RequestItem(BaseModel):
+    """第四级选项+单项金额(多选项请求,如工伤保险待遇的各费用项,样例2)。"""
+
+    name: str
+    object: float | None = None
+
+
 class RequestSpec(BaseModel):
-    """一条仲裁请求的提交参数(path_ids 为三级类型树节点 id)。"""
+    """一条仲裁请求的提交参数(path_ids 为三级类型树节点 id)。
+
+    单选项请求用 option+object;多选项请求($str 模板,如工伤保险待遇)用 items,
+    object 为空时自动按 items 求和。"""
 
     text: str  # 预登记原始自由文本(兜底 intro)
     path_ids: list[int]  # [一级id, 二级id, 三级id]
     option: str | None = None  # 第四级选项(无金额类请求可为空)
     object: float | None = None  # 标的金额(确认劳动关系等无金额请求为空)
+    items: list[RequestItem] = []  # 多选项明细(优先级高于 option)
     intro: str | None = None  # 请求表述;为空时按模板自动生成,生成不了退回 text
 
 
@@ -150,6 +161,7 @@ class SubmitSpec(BaseModel):
     case_reason: str
     is_sign_labor_contract: int = 1
     is_pay_social_insurance: int = 1
+    is_easy: int = 1  # 是否简易案件(样例1小额=1/样例2工伤20万=0,规则不明,界面可改)
     company_nature: str = DEFAULT_COMPANY_NATURE
     requests: list[RequestSpec]
 
@@ -222,13 +234,30 @@ def _fmt_amount(value: float) -> str:
     return s
 
 
-def _fill_template(template: str, option: str | None, obj: float | None) -> str | None:
-    """按内网模板生成请求表述。含无法填充的占位($str/选项N>1/缺金额)时返回 None。"""
+def _fill_template(
+    template: str,
+    option: str | None,
+    obj: float | None,
+    items: list[RequestItem] | None = None,
+) -> str | None:
+    """按内网模板生成请求表述。含无法填充的占位时返回 None。
+
+    $str 模板(样例2 工伤保险待遇):$str 替换为"（1）选项名金额元、（2）…"枚举,
+    需要 items 且每项有金额。
+    """
     if not template:
         return None
-    if "$str" in template or "选项2" in template:
-        return None
     out = template
+    if "$str" in out:
+        if not items or any(i.object is None for i in items):
+            return None
+        enum = "、".join(
+            f"（{n}）{i.name}{_fmt_amount(i.object)}元"
+            for n, i in enumerate(items, start=1)
+        )
+        out = out.replace("$str", enum)
+    if "选项2" in out:
+        return None
     if "选项1" in out:
         if not option:
             return None
@@ -371,19 +400,38 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
         leaf = by_leaf.get(req.path_ids[-1])
         if leaf is None:
             raise ValueError(f"仲裁请求类型不存在(id={req.path_ids[-1]}): {req.text[:20]}")
-        if req.option and req.option not in leaf["options"]:
+        option_names = [o for o in leaf["options"]]
+        if req.items:
+            bad = [i.name for i in req.items if i.name not in option_names]
+            if bad:
+                raise ValueError(f"第四级选项不在字典中: {'、'.join(bad)}")
+        elif req.option and req.option not in option_names:
             raise ValueError(f"第四级选项不在字典中: {req.option}")
-        intro = req.intro or _fill_template(leaf["template"], req.option, req.object) or req.text
+
+        # 多选项($str 模板):object 为空时按各项金额求和(样例2 工伤待遇)。
+        obj = req.object
+        if req.items and obj is None:
+            amounts = [i.object for i in req.items if i.object is not None]
+            obj = sum(amounts) if amounts else None
+        names = [i.name for i in req.items] if req.items else ([req.option] if req.option else [])
+        level4_arr = (
+            [{"name": i.name, "object": i.object} for i in req.items]
+            if req.items
+            else ([{"name": req.option, "object": obj}] if req.option else [])
+        )
+        intro = (
+            req.intro
+            or _fill_template(leaf["template"], req.option, obj, req.items or None)
+            or req.text
+        )
         arb_requests.append(
             {
                 "type": leaf["path"],
                 "is_main_dispute": 0,
-                "object": req.object,
+                "object": obj,
                 "intro": intro,
-                "opt": [[req.option] if req.option else []],
-                "level4_arr": (
-                    [{"name": req.option, "object": req.object}] if req.option else []
-                ),
+                "opt": [names],
+                "level4_arr": level4_arr,
                 "other": {},
             }
         )
@@ -405,7 +453,7 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
             "position": DEFAULT_POSITION,
             "town_id": spec.town_id,
             "arb_type": 1,
-            "is_easy": 1,
+            "is_easy": spec.is_easy,
             "new_business": 0,
             "platform": 0,
             "sentry_type": 0,
@@ -416,7 +464,12 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
         "arb_requests": arb_requests,
         "fact_reason": {
             "entry_at": _to_date_str(first.get("entry_date")),
+            # 样例2:工作地点/岗位也进 fact_reason(预登记本就有这两个字段)。
+            "actual_workplace": first.get("work_place"),
+            "job": first.get("position"),
+            "otherjob": first.get("position"),
             "salary": _to_float(first.get("monthly_wage")),
+            "is_sign_labor_contract": spec.is_sign_labor_contract,
             "is_pay_social_insurance": spec.is_pay_social_insurance,
             "main_cause": [None, ""],
             "content": facts,
@@ -532,6 +585,7 @@ async def build_draft(case: dict) -> dict:
             "case_reason": case_reason,
             "is_sign_labor_contract": 1,
             "is_pay_social_insurance": 1,
+            "is_easy": 1,
             "company_nature": DEFAULT_COMPANY_NATURE,
             "position": DEFAULT_POSITION,
         },

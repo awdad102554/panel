@@ -8,6 +8,7 @@ from datetime import date
 import pytest
 
 from app.services.case_submit import (
+    RequestItem,
     SubmitSpec,
     RequestSpec,
     build_payload,
@@ -178,6 +179,69 @@ def test_build_payload_intro_falls_back_to_text():
     assert req["intro"] == "请求确认双方存在劳动关系"
     assert req["opt"] == [[]]
     assert req["level4_arr"] == []
+
+
+def test_fill_template_multi_items():
+    """样例2:$str 模板+多选项枚举(工伤保险待遇)。"""
+    tpl = "请求裁决被申请人向申请人支付工伤保险待遇共计标的元（其中：$str）"
+    items = [
+        RequestItem(name="医疗费", object=21911.63),
+        RequestItem(name="住院期间伙食补助费", object=660),
+    ]
+    assert _fill_template(tpl, None, 22571.63, items) == (
+        "请求裁决被申请人向申请人支付工伤保险待遇共计22571.63元"
+        "（其中：（1）医疗费21911.63元、（2）住院期间伙食补助费660元）。"
+    )
+    # items 缺金额则不可填充
+    bad = [RequestItem(name="医疗费", object=None)]
+    assert _fill_template(tpl, None, 1.0, bad) is None
+
+
+def test_build_payload_multi_option_request():
+    """样例2:多选项请求 opt/level4_arr/object(求和)/intro 结构。"""
+    leaf = {
+        "path": [
+            {"id": 1, "code": "1", "name": "劳动争议"},
+            {"id": 11, "code": "2", "name": "社会保险争议"},
+            {"id": 12, "code": "3", "name": "工伤保险待遇争议"},
+        ],
+        "options": ["医疗费", "住院期间伙食补助费", "停工留薪期工资"],
+        "template": "请求裁决被申请人向申请人支付工伤保险待遇共计标的元（其中：$str）",
+    }
+    catalog = CATALOG + [leaf]
+    spec = SubmitSpec(
+        apply_at=date(2026, 8, 10),
+        case_reason="确认劳动关系",
+        is_easy=0,
+        requests=[
+            RequestSpec(
+                text="请求裁决被申请人支付工伤保险待遇",
+                path_ids=[1, 11, 12],
+                items=[
+                    RequestItem(name="医疗费", object=21911.63),
+                    RequestItem(name="住院期间伙食补助费", object=660),
+                ],
+            )
+        ],
+    )
+    payload = build_payload(CASE, spec, catalog)
+    req = payload["arb_requests"][0]
+    assert req["object"] == 22571.63
+    assert req["opt"] == [["医疗费", "住院期间伙食补助费"]]
+    assert req["level4_arr"] == [
+        {"name": "医疗费", "object": 21911.63},
+        {"name": "住院期间伙食补助费", "object": 660},
+    ]
+    assert "共计22571.63元（其中：（1）医疗费21911.63元、（2）住院期间伙食补助费660元）" in req["intro"]
+    assert payload["case_info"]["is_easy"] == 0
+    fr = payload["fact_reason"]
+    assert fr["actual_workplace"] == CASE["applicants"][0].get("work_place")
+    assert fr["is_sign_labor_contract"] == 1
+    # 多选项名称必须在字典内
+    bad_spec = spec.model_copy(deep=True)
+    bad_spec.requests[0].items = [RequestItem(name="不存在的费用", object=1)]
+    with pytest.raises(ValueError, match="不在字典"):
+        build_payload(CASE, bad_spec, catalog)
 
 
 def test_validate_case():

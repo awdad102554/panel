@@ -124,6 +124,7 @@ export interface SubmitDraft {
     case_reason: string;
     is_sign_labor_contract: number;
     is_pay_social_insurance: number;
+    is_easy: number;
     company_nature: string;
     position: { Id: number; name: string }[];
   };
@@ -140,11 +141,17 @@ export interface SubmitDraft {
   };
 }
 
+export interface RequestItem {
+  name: string;
+  object: number | null;
+}
+
 export interface RequestSpec {
   text: string;
   path_ids: number[];
   option: string | null;
   object: number | null;
+  items: RequestItem[];
   intro: string | null;
 }
 
@@ -154,6 +161,7 @@ export interface SubmitSpec {
   case_reason: string;
   is_sign_labor_contract: number;
   is_pay_social_insurance: number;
+  is_easy: number;
   company_nature: string;
   requests: RequestSpec[];
 }
