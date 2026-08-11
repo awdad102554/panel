@@ -114,11 +114,11 @@ async function handleSync(full: boolean) {
     const result = await internalCaseApi.triggerSync(full);
     if (full) {
       ElMessage.success(
-        `全量同步完成:预约 ${result.counts.reserve ?? 0} / 收件 ${result.counts.receive ?? 0} / 在办 ${result.counts.handle ?? 0} 条`,
+        `全量同步完成:预约 ${result.counts.reserve ?? 0} / 收件 ${result.counts.receive ?? 0} / 在办 ${result.counts.handle ?? 0} / 清理已删除 ${result.counts.deleted ?? 0} 条`,
       );
     } else {
       ElMessage.success(
-        `同步完成(轻量):在办 ${result.counts.handle ?? 0} / 收件待审核 ${result.counts.receive ?? 0} / 预约 ${result.counts.reserve ?? 0} / 日期补抓 ${(result.counts.receive_recent ?? 0) + (result.counts.handle_recent ?? 0)} / 补拉 ${result.counts.refetched ?? 0} 条`,
+        `同步完成(轻量):在办 ${result.counts.handle ?? 0} / 收件待审核 ${result.counts.receive ?? 0} / 预约 ${result.counts.reserve ?? 0} / 日期补抓 ${(result.counts.receive_recent ?? 0) + (result.counts.handle_recent ?? 0)} / 补拉 ${result.counts.refetched ?? 0} / 清理已删除 ${result.counts.deleted ?? 0} 条`,
       );
     }
     await refresh();

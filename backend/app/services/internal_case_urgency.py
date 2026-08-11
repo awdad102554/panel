@@ -70,6 +70,16 @@ def urgency_order(level: str) -> int:
     return _URGENCY_ORDER.get(level, 99)
 
 
+def sort_days_key(urgency: str, days_remaining: int | None) -> int:
+    """同档内排序的天数键(与 urgency_order 配合使用)。
+
+    普通档位 days_remaining 是剩余天数,越少越紧急(升序);中止档位的
+    days_remaining 存的是"已中止天数"(正数),停滞越久越该靠前(取负)。
+    """
+    days = days_remaining or 0
+    return -days if urgency in ("paused", "paused_overdue") else days
+
+
 def _by_days(days_remaining: int, soon_days: int, urgent_days: int = 1) -> UrgencyLevel:
     """按剩余天数分档:超期 < 紧急(≤urgent_days) < 临近(≤soon_days) < 正常。"""
     if days_remaining < 0:
@@ -91,6 +101,12 @@ def compute_urgency(
     # CST 时,UTC/CST 日界前后(0:00-8:00)不至于把天数算偏 1 天。
     today = today or datetime.now(_LOCAL_TZ).date()
 
+    # 0. 已结案/已归档是终态,优先于一切(含人工覆盖)——"结案即终态"口径:
+    # 已结案案件设过人工覆盖也不应重新出现在时效提醒里(2026-08-10 修正,
+    # 此前 override 优先,终态案件会因覆盖重新告警)。
+    if row.stage == InternalStage.HANDLE and row.current_step in (CLOSED_STEP, ARCHIVED_STEP):
+        return UrgencyResult("closed", None, "status")
+
     # 1. 人工时效覆盖优先。
     if override is not None:
         days = (override.deadline_override - today).days
@@ -98,27 +114,24 @@ def compute_urgency(
 
     # stage 列显式声明为 String,从库中读回是 str 而非枚举,故用 == 而非 is 比较。
     if row.stage == InternalStage.HANDLE:
-        # 2a. 已结案/已归档:终态,不参与任何提醒(结案后的送达环节不再跟踪)。
-        if row.current_step in (CLOSED_STEP, ARCHIVED_STEP):
-            return UrgencyResult("closed", None, "status")
-        # 2b. 未通过/退回状态:需要返工,红色 overdue 级最高优先。
+        # 2a. 未通过/退回状态:需要返工,红色 overdue 级最高优先。
         if row.current_step in REWORK_STEPS:
             return UrgencyResult("overdue", None, "status")
-        # 2c. 审理中止:标"已中止XX天";暂停超过阈值升级为 paused_overdue 提醒。
+        # 2b. 审理中止:标"已中止XX天";暂停超过阈值升级为 paused_overdue 提醒。
         # days_remaining 存"已中止天数"(正数),供前端显示"中止XX天"。
         if row.is_paused or row.current_step == PAUSED_STEP:
             paused_days = (today - _as_date(row.phase_entered_at)).days
             if paused_days > settings.case_urgency_paused_alert_days:
                 return UrgencyResult("paused_overdue", paused_days, "elapsed")
             return UrgencyResult("paused", paused_days, "elapsed")
-        # 2d. 组织调解:无原生时限,进入调解环节超过约一个月提醒。
+        # 2c. 组织调解:无原生时限,进入调解环节超过约一个月提醒。
         # days_remaining 传 None:调解没有"剩余天数"概念,传负数前端会误显"已超期 X 天"。
         if row.current_step == MEDIATION_STEP:
             mediation_days = (today - _as_date(row.phase_entered_at)).days
             if mediation_days > settings.case_mediation_alert_days:
                 return UrgencyResult("soon", None, "elapsed")
             return UrgencyResult("normal", settings.case_mediation_alert_days - mediation_days, "elapsed")
-        # 2e. 普通在办:用原生剩余审理天数。
+        # 2d. 普通在办:用原生剩余审理天数。
         if row.native_remaining_days is not None:
             return UrgencyResult(
                 _by_days(row.native_remaining_days, settings.case_urgency_soon_days, settings.case_urgency_urgent_days),

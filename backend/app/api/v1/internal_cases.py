@@ -27,7 +27,13 @@ from app.schemas.internal_case import (
 )
 from app.services.internal_case_sync import sync_internal_cases, verify_consistency
 from app.services.time_limits import effective_settings
-from app.services.internal_case_urgency import UrgencyResult, compute_urgency
+from app.services.internal_case_urgency import (
+    ARCHIVED_STEP,
+    CLOSED_STEP,
+    UrgencyResult,
+    compute_urgency,
+    sort_days_key,
+)
 
 router = APIRouter(prefix="/internal-cases", tags=["internal-cases"])
 
@@ -52,6 +58,8 @@ def _build_out(
         extension_days = int(payload.get("extension_days") or 0)
     except (TypeError, ValueError):
         extension_days = 0
+    # 终态案件的存量覆盖不生效(compute_urgency 已忽略),展示层同样压掉,避免显示一个无效的覆盖标识。
+    terminal = row.current_step in (CLOSED_STEP, ARCHIVED_STEP)
     return InternalCaseOut(
         external_case_id=row.external_case_id,
         stage=row.stage,
@@ -69,8 +77,8 @@ def _build_out(
         urgency=urgency.urgency,
         days_remaining=urgency.days_remaining,
         urgency_source=urgency.source,
-        has_override=override is not None,
-        override_deadline=override.deadline_override if override else None,
+        has_override=override is not None and not terminal,
+        override_deadline=override.deadline_override if override and not terminal else None,
     )
 
 
@@ -104,8 +112,9 @@ async def list_internal_cases(
             continue
         items.append((result, _build_out(row, override, result)))
 
-    # 紧急度权重升序(超期最靠前);同档内剩余天数越少越靠前,无倒计时口径的排最后。
-    items.sort(key=lambda item: (item[0].order, item[0].days_remaining is None, item[0].days_remaining or 0))
+    # 紧急度权重升序(超期最靠前);同档内剩余天数越少越靠前(中止档位取已中止天数越久越靠前),
+    # 无倒计时口径的排最后。
+    items.sort(key=lambda item: (item[0].order, item[0].days_remaining is None, sort_days_key(item[0].urgency, item[0].days_remaining)))
     return [out for _, out in items]
 
 
@@ -203,7 +212,18 @@ async def upsert_override(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> InternalCaseOut:
-    """设置/更新单个案件的人工时效覆盖(覆盖后以其为准,不再走默认阈值)。"""
+    """设置/更新单个案件的人工时效覆盖(覆盖后以其为准,不再走默认阈值)。
+
+    已结案/已归档是终态(结案即终态口径),拒绝设置覆盖。
+    """
+    stmt = select(InternalCaseTracking).where(
+        InternalCaseTracking.external_case_id == external_case_id
+    )
+    row = (await db.execute(stmt)).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="内网案件不存在")
+    if row.current_step in (CLOSED_STEP, ARCHIVED_STEP):
+        raise HTTPException(status_code=422, detail="已结案/已归档案件无需时效覆盖")
     stmt = select(CaseTimeLimitOverride).where(
         CaseTimeLimitOverride.external_case_id == external_case_id
     )

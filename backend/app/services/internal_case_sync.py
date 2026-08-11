@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,7 @@ from app.integrations.case_system.client import (
     get_case_system_client,
 )
 from app.models.internal_case import (
+    CaseTimeLimitOverride,
     InternalCaseTracking,
     InternalStage,
     SyncVerificationReport,
@@ -152,12 +153,16 @@ async def _fetch_first_page(
 
 
 async def _fetch_single_by_case_no(
-    client: CaseSystemClient, stage: InternalStage, case_no: str | None
+    client: CaseSystemClient,
+    stage: InternalStage,
+    case_no: str | None,
+    expected_case_id: str | None = None,
 ) -> dict | None:
     """按案号单点补拉一条记录(轻量同步里捕获结案/退回的状态翻转)。
 
     内网 case_no 查询参数只认 "[2025]427" 这种核心格式(与 InfoWeb 立案查询的
     转换逻辑一致),需从完整案号里提取。查不到返回 None。
+    expected_case_id 传入时校验返回记录的 case_id,防止案号模糊匹配串案。
     """
     if not case_no:
         return None
@@ -172,8 +177,59 @@ async def _fetch_single_by_case_no(
         raise CaseSystemError(f"{stage.value}_single_http_{resp.status_code}")
     body = resp.json()
     data = body.get("data") if isinstance(body, dict) else None
-    batch = (data.get("data") or []) if isinstance(data, dict) else []
-    return batch[0] if batch else None
+    batch = (data.get("data") or data.get("list") or []) if isinstance(data, dict) else []
+    if expected_case_id is None:
+        return batch[0] if batch else None
+    # 案号核心格式是模糊匹配(如 "[2025]427" 可能命中 4270),在返回的整页里
+    # 按 case_id 定位目标记录,不能只看首条——目标在 batch[1+] 时只看首条会
+    # 误判"未查到",把 receive→handle 补拉路径的案件冻结在收件环节。
+    for raw in batch:
+        if str(raw.get("case_id")) == expected_case_id:
+            return raw
+    if batch:
+        logger.warning("单点补拉案号 %s 的返回里没有目标 case_id,按未查到处理", case_no)
+    return None
+
+
+def _payload_dates(raw_payload: dict) -> list[date]:
+    """候选申请/收件日期(去重,优先级序):application_at / receive_at / created_at。
+
+    内网 application_date 过滤按哪个字段过滤是黑盒,且工作人员可能改申请日期,
+    单一日期键 + ±1 天窗口存在"案件还在但探测不到"的误删路径(2026-08-10 复查发现),
+    故取三个键的并集逐日探测。
+    """
+    days: list[date] = []
+    for key in ("application_at", "receive_at", "created_at"):
+        dt = _parse_dt((raw_payload or {}).get(key))
+        if dt is not None and dt.date() not in days:
+            days.append(dt.date())
+    return days
+
+
+async def _probe_receive_by_date(
+    client: CaseSystemClient, ext_id: str, raw_payload: dict
+) -> dict | None:
+    """无案号 receive 案件的定点探测:按候选日期(各 ±1 天窗口)拉收件记录,按 case_id 定位。
+
+    "保存未审批"的收件没有正式案号(案号字段是哈希串),案号探测无效;但 case_id
+    稳定、申请日期已知,且 receive 接口的 application_date 过滤返回各状态记录
+    (日期补抓已实测验证),借此区分"已处理/已修改"(找到)与"内网已删除"(找不到)。
+    找到返回记录;找不到返回 None;请求失败抛 CaseSystemError。
+    """
+    days = _payload_dates(raw_payload)
+    if not days:
+        return None
+    probe_days = sorted({d + timedelta(days=off) for d in days for off in (0, -1, 1)})
+    for day in probe_days:
+        records = await _fetch_stage_records(
+            client,
+            _STAGE_PATHS[InternalStage.RECEIVE],
+            {"application_date": day.isoformat()},
+        )
+        for raw in records:
+            if str(raw.get("case_id")) == ext_id:
+                return raw
+    return None
 
 
 def _phase_anchor_fallback(stage: InternalStage, raw: dict) -> datetime:
@@ -268,6 +324,7 @@ async def sync_internal_cases(
     specs = _STAGE_SPECS if full else _STAGE_SPECS_LIGHT
     merged: dict[str, dict] = {}
     counts: dict[str, int] = {}
+    fetched_stages: set[InternalStage] = set()
     for stage, path, extra in specs:
         try:
             records = await _fetch_stage_records(client, path, extra)
@@ -275,6 +332,7 @@ async def sync_internal_cases(
             logger.warning("内网环节 %s 同步失败,跳过: %s", stage.value, exc)
             counts[stage.value] = 0
             continue
+        fetched_stages.add(stage)
         counts[stage.value] = len(records)
         for raw in records:
             if raw.get("case_id") is None:
@@ -282,6 +340,20 @@ async def sync_internal_cases(
             mapped = _map_record(stage, raw)
             _merge_by_priority(merged, mapped)
 
+    deleted_ids: list[str] = []
+    if full and len(fetched_stages) == len(_STAGE_SPECS):
+        # 全量模式下 receive/handle 拉的是全量历史,快照多出=内网已删除,顺手清理
+        # (轻量模式的清理走消失检测;reserve 接口只回不通过记录、不是全量,不参与)。
+        # 任一环节拉取失败则跳过清理,防止把"没拉到"误判成"已删除"。
+        deleted_ids = [
+            ext_id
+            for ext_id, prev in existing.items()
+            if ext_id not in merged
+            and prev.stage in (InternalStage.RECEIVE, InternalStage.HANDLE)
+        ]
+        if deleted_ids:
+            counts["deleted"] = len(deleted_ids)
+            logger.info("全量同步清理内网已删除案件的快照: %d 件", len(deleted_ids))
     if not full:
         # 按日期补抓(2026-08-06 实测内网支持 application_date 过滤):今天+昨天的
         # 新收件/新立案各拉一次(每次通常个位数条)。捕获"快速流转"案件——提交后
@@ -319,7 +391,9 @@ async def sync_internal_cases(
                     _merge_by_priority(merged, mapped)
             counts[count_key] = fetched
 
-        counts["refetched"] = await _refetch_disappeared(client, existing, merged)
+        counts["refetched"], deleted_ids = await _refetch_disappeared(client, existing, merged)
+        if deleted_ids:
+            counts["deleted"] = len(deleted_ids)
 
     now = _utc_now()
     rows: list[dict] = []
@@ -328,10 +402,17 @@ async def sync_internal_cases(
         prev = existing.get(ext_id)
         if prev is None:
             phase_entered_at = _phase_anchor_fallback(mapped["stage"], mapped["raw_payload"])
-        elif prev.stage == mapped["stage"] and prev.current_step == mapped["current_step"]:
-            phase_entered_at = prev.phase_entered_at  # 环节/子状态未变,锚点保持
+        elif (
+            prev.stage == mapped["stage"]
+            and prev.current_step == mapped["current_step"]
+            and prev.is_paused == mapped["is_paused"]
+        ):
+            phase_entered_at = prev.phase_entered_at  # 环节/子状态/中止标志未变,锚点保持
         else:
-            phase_entered_at = now  # 环节/子状态变化,以本轮同步时刻为近似锚点
+            # 环节/子状态/中止标志变化,以本轮同步时刻为近似锚点。
+            # is_paused 翻转必须重置:紧急度按锚点算"已中止XX天"(internal_case_urgency),
+            # 内网只把 stop 置 1 而 current_step 不变时,不重置会高估中止时长。
+            phase_entered_at = now
         rows.append({**mapped, "phase_entered_at": phase_entered_at, "last_synced_at": now})
         # 在办→已结案/已归档:中止天数需按结案日重算(在办期间是按"算到当天"留下的),
         # 置回 None,由 internal_case_pause 的存量通道下一轮精确重算。
@@ -371,6 +452,22 @@ async def sync_internal_cases(
         )
         logger.info("检测到 %d 件案件结案,paused_days 已重置待按结案日重算", len(newly_closed_ids))
 
+    if deleted_ids:
+        # 内网侧已删除的案件(轻量:日期窗口探测确认;全量:全量历史比对),清理快照,
+        # 连带清掉同 id 的人工时效覆盖(override 表无 FK,不连带会留孤儿行,
+        # 内网若重建同 case_id 案件,旧覆盖会静默生效)。
+        await db.execute(
+            delete(InternalCaseTracking).where(
+                InternalCaseTracking.external_case_id.in_(deleted_ids)
+            )
+        )
+        await db.execute(
+            delete(CaseTimeLimitOverride).where(
+                CaseTimeLimitOverride.external_case_id.in_(deleted_ids)
+            )
+        )
+        logger.info("清理内网已删除案件的快照: %d 件 %s", len(deleted_ids), deleted_ids)
+
     logger.info("内网案件同步(%s):抓取 %s,合并落库 %d 条", "全量" if full else "轻量", counts, len(rows))
     return counts
 
@@ -379,14 +476,23 @@ async def _refetch_disappeared(
     client: CaseSystemClient,
     existing: dict[str, InternalCaseTracking],
     merged: dict[str, dict],
-) -> int:
+) -> tuple[int, list[str]]:
     """轻量同步:补拉"上一轮还在办、本轮不在筛选结果里"的案件。
 
     这些案件多半是状态翻转:handle 在办→已结案、receive 待审核→已处理(立案或退回)。
     已结案/已归档、receive 已处理(status!=0)的快照行本就不再变化,不在检测范围。
-    查不到的保留快照原值并记 warning。
+
+    探测手段(按优先级):
+    - 案号单点补拉(有正式案号的案件);
+    - receive 无案号(哈希案号)案件退到"申请日期±1天 + case_id"定点探测
+      (_probe_receive_by_date):找到=已处理/已修改,更新快照;窗口内找不到=
+      内网已删除,删除快照行(误删代价低,全量同步可恢复)。
+    探测请求失败的保留快照原值下轮重试,宁可不删。
+
+    返回 (补拉更新件数, 判定删除的 external_case_id 列表)——删除由调用方落库。
     """
     refetched = 0
+    deleted_ids: list[str] = []
     for ext_id, prev in existing.items():
         if ext_id in merged:
             continue
@@ -399,23 +505,69 @@ async def _refetch_disappeared(
         else:
             continue  # reserve 环节返回的本来就是不通过记录,无需检测
         try:
-            raw = await _fetch_single_by_case_no(client, prev.stage, prev.case_no)
+            raw = await _fetch_single_by_case_no(
+                client, prev.stage, prev.case_no, expected_case_id=ext_id
+            )
         except CaseSystemError as exc:
             logger.warning("补拉案件 %s 失败: %s", prev.case_no, exc)
             continue
+        if prev.stage == InternalStage.RECEIVE and raw is None:
+            # 案号探测无效(无案号/未查到):按申请日期+case_id 定点探测,区分删除与已处理。
+            try:
+                raw = await _probe_receive_by_date(client, ext_id, prev.raw_payload or {})
+            except CaseSystemError as exc:
+                logger.warning(
+                    "补拉案件 %s 按日期探测失败,保留快照原值下轮重试: %s", prev.case_no, exc
+                )
+                continue
+            if raw is None:
+                if not _payload_dates(prev.raw_payload or {}):
+                    # 取不到申请日期就无法探测,"找不到"和"无法找"必须区分——
+                    # 后者判删除会误删(2026-08-10 自检发现)。
+                    logger.warning(
+                        "补拉案件 %s 的快照缺少申请日期,无法定点探测,保留原值", prev.case_no
+                    )
+                    continue
+                deleted_ids.append(ext_id)
+                logger.info(
+                    "补拉案件 %s 在内网已删除(日期窗口探测无记录),删除快照", prev.case_no
+                )
+                continue
         if raw is None or raw.get("case_id") is None:
             logger.warning("补拉案件 %s 未查到,保留快照原值", prev.case_no)
             continue
         mapped = _map_record(prev.stage, raw)
+        if prev.stage == InternalStage.RECEIVE and (raw.get("status") or 0) != 0:
+            # receive 待审核案件已处理(立案/退回):可能已流转 handle,甚至老申请
+            # 集中处理后立案当天结案(不在日期补抓窗口内)。再探一次 handle,
+            # 否则快照会冻结在 receive 直到人工全量同步(2026-08-10 审查发现)。
+            # 案号优先用探测到的最新记录里的——保存后正式提交会获得正式收字号,
+            # 用快照里的哈希案号探 handle 会被正则短路,防冻结逻辑形同虚设
+            # (2026-08-10 复查发现)。
+            probe_case_no = raw.get("case_no") or prev.case_no
+            try:
+                handle_raw = await _fetch_single_by_case_no(
+                    client, InternalStage.HANDLE, probe_case_no, expected_case_id=ext_id
+                )
+            except CaseSystemError as exc:
+                # handle 探测失败不能落 receive 结果:若案件其实"立案当天已结案",
+                # 落了 receive 已处理后下轮补拉会被 status!=0 跳过,快照永久冻结。
+                # 保留快照原值,下轮重试(2026-08-10 复查发现)。
+                logger.warning("补拉案件 %s 的 handle 环节失败,保留快照原值下轮重试: %s", prev.case_no, exc)
+                continue
+            if handle_raw is not None and handle_raw.get("case_id") is not None:
+                mapped = _map_record(InternalStage.HANDLE, handle_raw)
+            # handle 明确未查到(无异常):基本等价于"退回/不同意",落 receive 结果。
         merged[ext_id] = mapped
         refetched += 1
         logger.info(
             "补拉案件 %s:%s → %s",
             prev.case_no,
-            prev.current_step or prev.stage.value,
-            mapped["current_step"] or mapped["stage"].value,
+            # stage 列是 String,读回为 str;mapped 的 stage 可能是枚举也可能是 str,统一取值。
+            prev.current_step or str(prev.stage),
+            mapped["current_step"] or getattr(mapped["stage"], "value", mapped["stage"]),
         )
-    return refetched
+    return refetched, deleted_ids
 
 
 # 一致性校验比对的字段(阶段/子状态/结案信息;剩余天数每天自然变化,不比)。
@@ -485,6 +637,24 @@ async def verify_consistency(
                     }
                 )
             continue  # 环节都不同了,子状态不再逐项比
+        # receive 环节加比内网 status(不在 _VERIFY_FIELDS 里):"保存未审批"的收件
+        # 被退回/处理后,环节和子状态都不变,只有 raw_payload.status 变化(2026-08-10
+        # 实测陈宁娥案:快照停在待审核,校验此前报不出来)。
+        if expected["stage"] is InternalStage.RECEIVE:
+            # 两侧都过 _parse_int:快照 JSONB 里是 int,内网若返回字符串 "0" 不致噪声。
+            snap_status = _parse_int((prev.raw_payload or {}).get("status"))
+            net_status = _parse_int((expected["raw_payload"] or {}).get("status"))
+            if snap_status != net_status:
+                mismatch_total += 1
+                if len(mismatches) < _VERIFY_DETAILS_CAP:
+                    mismatches.append(
+                        {
+                            "case_no": prev.case_no,
+                            "field": "receive_status",
+                            "snapshot": snap_status,
+                            "intranet": net_status,
+                        }
+                    )
         for field in _VERIFY_FIELDS:
             if getattr(prev, field) != expected[field]:
                 mismatch_total += 1
