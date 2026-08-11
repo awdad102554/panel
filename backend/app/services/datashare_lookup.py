@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 _PERSON_PATH = "/v1/api/admin/datashare/openPlatformProxy/api/SJCK_idCardInfo"
 _COMPANY_PATH = "/v1/api/admin/datashare/openPlatformProxy/api/SJCK_businessFiveCertInfo"
+# 代理人(律师等)系统内查询:GET cases/Agent,即内网代理人-添加弹窗"系统内查询"按钮。
+_AGENT_PATH = "/v1/api/admin/cases/Agent"
 
 # 企业字段 → 中文(与 InfoWeb format_company_info 一致)。
 _COMPANY_FIELDS = {
@@ -113,6 +115,43 @@ async def lookup_person(id_card: str, client: CaseSystemClient | None = None) ->
     if isinstance(data, dict):
         return _format_person(data)
     return None
+
+
+async def lookup_agent(
+    name: str | None = None,
+    id_number: str | None = None,
+    mobile: str | None = None,
+    client: CaseSystemClient | None = None,
+) -> list[dict]:
+    """查代理人(内网 cases/Agent,GET):姓名/身份证号/手机号至少一项。
+
+    返回该代理人在历史案件中的登记记录(同人可能多条,如换律所),保留内网原始字段,
+    前端取常用项回填(name/id_type/id_number/mobile/law_firm_name/agent_auth/
+    lawer_type/is_legal_aid/relation/registered_permanent_residence/receive_address/job)。
+    """
+    client = client or get_case_system_client()
+    params: dict[str, str | int] = {"page": 1, "page_size": 10}
+    if name and name.strip():
+        params["name"] = name.strip()
+    if id_number and id_number.strip():
+        params["id_number"] = id_number.strip()
+    if mobile and mobile.strip():
+        params["mobile"] = mobile.strip()
+    if len(params) == 2:
+        return []
+    resp = await client.get(_AGENT_PATH, params=params)
+    if resp.status_code != 200:
+        raise CaseSystemError(f"agent_http_{resp.status_code}")
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise CaseSystemError(f"bad_json: {exc}") from exc
+    if body.get("code") != 200:
+        logger.warning("代理人查询业务错误: %s", str(body)[:200])
+        return []
+    data = body.get("data") or {}
+    items = data.get("list") if isinstance(data, dict) else None
+    return [i for i in (items or []) if isinstance(i, dict) and i.get("name")]
 
 
 async def lookup_company(

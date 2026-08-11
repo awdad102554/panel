@@ -32,7 +32,7 @@ from app.services.case_submit import (
     get_request_catalog,
     submit_case,
 )
-from app.services.datashare_lookup import lookup_company, lookup_person
+from app.services.datashare_lookup import lookup_agent, lookup_company, lookup_person
 
 router = APIRouter(prefix="/virtual-cases", tags=["virtual-cases"])
 
@@ -416,6 +416,24 @@ async def lookup_person_endpoint(
     if data is None:
         raise HTTPException(status_code=404, detail="未查到该身份证对应的自然人信息")
     return {"code": 200, "data": data}
+
+
+@router.get("/lookup/agent")
+async def lookup_agent_endpoint(
+    name: str | None = None,
+    id_number: str | None = None,
+    mobile: str | None = None,
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """查代理人(内网 cases/Agent:姓名/身份证号/手机号至少一项,返回内网原始记录列表)。"""
+    try:
+        items = await lookup_agent(name=name, id_number=id_number, mobile=mobile)
+    except CaseSystemError as exc:
+        logger.warning("查代理人接口异常: %s", exc)
+        raise HTTPException(status_code=502, detail="查询服务不可用") from exc
+    if not items:
+        raise HTTPException(status_code=404, detail="未查到匹配的代理人信息")
+    return {"code": 200, "data": items}
 
 
 @router.get("/lookup/company")
