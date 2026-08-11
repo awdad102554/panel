@@ -249,13 +249,16 @@ def test_compose_facts_and_overrides():
     from app.services.case_submit import compose_facts
 
     first = CASE["applicants"][0]
-    text = compose_facts(first, 1, 1, "被申请人违法解除与申请人劳动关系，请求支付赔偿金")
+    text = compose_facts(first, 1, 1, ["被申请人违法解除与申请人劳动关系，请求支付赔偿金"])
     assert text == (
         "本人于2011年1月1日入职被申请人处, 月工资标准为3656.25元。"
         "本人入职后，被申请人有与本人签订书面劳动合同,有为本人缴纳社会保险费;"
         "因被申请人违法解除与申请人劳动关系，请求支付赔偿金。"
         "为维护本人合法权益，特提出申请，望裁如所请。"
     )
+    # 多主因:顿号连接
+    text_multi = compose_facts(first, 1, 1, ["申请人负工伤，被申请人拒绝支付工伤保险待遇", "其他补充"])
+    assert "因申请人负工伤，被申请人拒绝支付工伤保险待遇，其他补充。" in text_multi
     # 无主因:分号变句号
     text2 = compose_facts(first, 0, 0)
     assert "没有与本人签订书面劳动合同,没有为本人缴纳社会保险费。为维护" in text2
@@ -270,13 +273,18 @@ def test_compose_facts_and_overrides():
     spec = SubmitSpec(
         apply_at=date(2026, 5, 20),
         case_reason="经济补偿争议",
-        main_cause="被申请人拖欠工资",
+        main_causes=["被申请人拖欠工资"],
         fact_content="手工编辑的事实理由。",
         requests=[RequestSpec(text="x", path_ids=[1, 26, 28], option="解除劳动合同的经济补偿", object=1)],
     )
     fr = build_payload(case_no_facts, spec, CATALOG)["fact_reason"]
     assert fr["content"] == "手工编辑的事实理由。"
-    assert fr["main_cause"] == ["被申请人拖欠工资"]
+    # 非预设文本视为"其他":[None, 文本](样例1)
+    assert fr["main_cause"] == [None, "被申请人拖欠工资"]
+    # 预设原样入列
+    spec_preset = spec.model_copy(update={"main_causes": ["申请人负工伤，被申请人拒绝支付工伤保险待遇"]})
+    fr_p = build_payload(case_no_facts, spec_preset, CATALOG)["fact_reason"]
+    assert fr_p["main_cause"] == ["申请人负工伤，被申请人拒绝支付工伤保险待遇"]
     # 不给 fact_content/facts:自动生成
     spec2 = spec.model_copy(update={"fact_content": None})
     fr2 = build_payload(case_no_facts, spec2, CATALOG)["fact_reason"]

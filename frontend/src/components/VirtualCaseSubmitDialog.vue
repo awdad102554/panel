@@ -28,9 +28,10 @@ const form = ref({
   is_pay_social_insurance: 1,
   is_easy: 1,
   company_nature: "私营企业",
-  main_cause: "",
   fact_content: "",
 });
+const mainCauseSelected = ref<string[]>([]);
+const mainCauseOther = ref("");
 interface RequestRow {
   text: string;
   path: number[]; // cascader 绑定
@@ -62,9 +63,10 @@ watch(
         is_pay_social_insurance: d.defaults.is_pay_social_insurance,
         is_easy: d.defaults.is_easy,
         company_nature: d.defaults.company_nature,
-        main_cause: "",
         fact_content: d.fact_content,
       };
+      mainCauseSelected.value = [];
+      mainCauseOther.value = "";
       requestRows.value = d.requests.map((r) => ({
         text: r.text,
         path: r.path_ids ? [...r.path_ids] : [],
@@ -161,7 +163,10 @@ function buildSpec(): SubmitSpec {
     is_pay_social_insurance: form.value.is_pay_social_insurance,
     is_easy: form.value.is_easy,
     company_nature: form.value.company_nature,
-    main_cause: form.value.main_cause.trim() || null,
+    main_causes: [
+      ...mainCauseSelected.value,
+      ...(mainCauseOther.value.trim() ? [mainCauseOther.value.trim()] : []),
+    ],
     fact_content: form.value.fact_content.trim() || null,
     requests: requestRows.value.map((r) => {
       const multi = isMulti(r);
@@ -200,8 +205,11 @@ function composeFacts() {
   const sign = form.value.is_sign_labor_contract === 1 ? "有" : "没有";
   const ins = form.value.is_pay_social_insurance === 1 ? "有" : "没有";
   let seg2 = `本人入职后，被申请人${sign}与本人签订书面劳动合同,${ins}为本人缴纳社会保险费`;
-  const cause = form.value.main_cause.trim();
-  seg2 += cause ? `;因${cause}。` : "。";
+  const causes = [
+    ...mainCauseSelected.value,
+    ...(mainCauseOther.value.trim() ? [mainCauseOther.value.trim()] : []),
+  ];
+  seg2 += causes.length ? `;因${causes.join("，")}。` : "。";
   segs.push(seg2);
   segs.push("为维护本人合法权益，特提出申请，望裁如所请。");
   form.value.fact_content = segs.join("");
@@ -405,8 +413,21 @@ const companyFillText = computed(() => {
         <div class="section-title">事实理由(与内网相同的自动生成,可编辑)</div>
         <div class="fact-section">
           <div class="fact-cause">
-            <label>主要原因(填入"因…"段,如:被申请人违法解除与申请人劳动关系，请求支付赔偿金)</label>
-            <el-input v-model="form.main_cause" placeholder="选填,留空则不含此段" />
+            <label>本次申请劳动仲裁的最主要原因(填入"因…"段,可多选)</label>
+            <el-checkbox-group v-model="mainCauseSelected">
+              <el-checkbox
+                v-for="p in draft.meta.main_cause_presets"
+                :key="p"
+                :value="p"
+                class="cause-checkbox"
+              >
+                {{ p }}
+              </el-checkbox>
+            </el-checkbox-group>
+            <div class="cause-other">
+              <span class="cause-other-label">其他</span>
+              <el-input v-model="mainCauseOther" placeholder="选填,自定义主要原因" />
+            </div>
           </div>
           <div class="fact-editor">
             <el-input v-model="form.fact_content" type="textarea" :rows="4" />
@@ -522,6 +543,28 @@ const companyFillText = computed(() => {
   font-size: 13px;
   color: var(--el-text-color-regular);
   margin-bottom: 4px;
+}
+
+.cause-checkbox {
+  display: flex;
+  margin-right: 0;
+  height: auto;
+  white-space: normal;
+  align-items: flex-start;
+  padding: 2px 0;
+}
+
+.cause-other {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.cause-other-label {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  flex-shrink: 0;
 }
 
 .fact-editor {

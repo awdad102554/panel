@@ -130,6 +130,17 @@ DEFAULT_APPLICANT_TYPE = "劳动者"
 DEFAULT_COMPANY_NATURE = "私营企业"
 SUBMIT_PATH = "/v1/api/admin/arb/receive/add"
 
+# 内网"您本次申请劳动仲裁的最主要原因"预设选项(2026-08-11 内网编辑页截图核对;
+# 该列表不在任何字典接口里,为内网前端写死)。勾选其他时为 [None, 自定义文本](样例1)。
+MAIN_CAUSE_PRESETS = [
+    "被申请人拒绝确认与本人劳动关系，请求确认双方存在劳动关系",
+    "被申请人未与本人签订书面劳动合同",
+    "被申请人未及时足额支付劳动报酬",
+    "被申请人违反劳动合同约定，申请人请求解除劳动关系并要求被申请人支付经济补偿",
+    "被申请人违法解除与申请人劳动关系，请求支付赔偿金",
+    "申请人负工伤，被申请人拒绝支付工伤保险待遇",
+]
+
 
 # ---------------------------------------------------------------- 输入模型
 
@@ -163,7 +174,9 @@ class SubmitSpec(BaseModel):
     is_pay_social_insurance: int = 1
     is_easy: int = 1  # 是否简易案件(样例1小额=1/样例2工伤20万=0,规则不明,界面可改)
     company_nature: str = DEFAULT_COMPANY_NATURE
-    main_cause: str | None = None  # 主要原因(进 fact_reason.main_cause 与事实理由"因…"段)
+    # 主要原因(进 fact_reason.main_cause 与事实理由"因…"段):预设文本原样,
+    # 非预设视为"其他"自定义文本(内网结构 [None, 自定义],样例1)。
+    main_causes: list[str] = []
     fact_content: str | None = None  # 事实理由全文(用户编辑版;为空则自动生成/用预登记 facts)
     requests: list[RequestSpec]
 
@@ -172,13 +185,13 @@ def compose_facts(
     first: dict,
     is_sign_labor_contract: int,
     is_pay_social_insurance: int,
-    main_cause: str | None = None,
+    main_causes: list[str] | None = None,
 ) -> str:
     """按内网"自动生成事实理由"的模板拼接(来自内网前端 getContent,样例2 验证)。
 
     模板:本人于X年X月X日入职被申请人处, 实际工作地点…，工作岗位为…，月工资标准为…元。
     本人入职后，被申请人{有/没有}与本人签订书面劳动合同,{有/没有}为本人缴纳社会保险费;
-    因{main_cause}。为维护本人合法权益，特提出申请，望裁如所请。
+    因{main_causes.join("，")}。为维护本人合法权益，特提出申请，望裁如所请。
     缺字段的片段自动省略,不出现"None/空"字样。
     """
     parts: list[str] = []
@@ -199,13 +212,24 @@ def compose_facts(
     sign = "有" if is_sign_labor_contract == 1 else "没有"
     ins = "有" if is_pay_social_insurance == 1 else "没有"
     parts.append(f"本人入职后，被申请人{sign}与本人签订书面劳动合同,{ins}为本人缴纳社会保险费")
-    cause = (main_cause or "").strip()
+    cause = "，".join(c.strip() for c in (main_causes or []) if c and c.strip())
     if cause:
         parts[-1] += f";因{cause}。"
     else:
         parts[-1] += "。"
     parts.append("为维护本人合法权益，特提出申请，望裁如所请。")
     return "".join(parts)
+
+
+def _main_cause_array(main_causes: list[str]) -> list:
+    """组装 fact_reason.main_cause:预设原样入列;"其他"自定义文本按内网结构
+    表示为 [None, 文本](样例1)。空列表退回 [None, ""]。"""
+    presets = [c for c in main_causes if c in MAIN_CAUSE_PRESETS]
+    customs = [c.strip() for c in main_causes if c not in MAIN_CAUSE_PRESETS and c.strip()]
+    out: list = list(presets)
+    if customs:
+        out += [None, "；".join(customs)]
+    return out or [None, ""]
 
 
 # ---------------------------------------------------------------- 关键词猜测
@@ -486,9 +510,9 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
         )
     if not facts:
         facts = compose_facts(
-            first, spec.is_sign_labor_contract, spec.is_pay_social_insurance, spec.main_cause
+            first, spec.is_sign_labor_contract, spec.is_pay_social_insurance, spec.main_causes
         )
-    main_cause = [spec.main_cause.strip()] if spec.main_cause and spec.main_cause.strip() else [None, ""]
+    main_cause = _main_cause_array(spec.main_causes)
     return {
         "case_info": {
             "case_reason": spec.case_reason,
@@ -662,6 +686,7 @@ async def build_draft(case: dict) -> dict:
             "case_reasons": dict_names,
             "company_natures": [d["name"] for d in company_natures],
             "catalog": catalog,
+            "main_cause_presets": MAIN_CAUSE_PRESETS,
         },
     }
 

@@ -145,6 +145,7 @@ export interface SubmitDraft {
     case_reasons: string[];
     company_natures: string[];
     catalog: CatalogItem[];
+    main_cause_presets: string[];
   };
 }
 
@@ -170,7 +171,7 @@ export interface SubmitSpec {
   is_pay_social_insurance: number;
   is_easy: number;
   company_nature: string;
-  main_cause: string | null;
+  main_causes: string[];
   fact_content: string | null;
   requests: RequestSpec[];
 }
