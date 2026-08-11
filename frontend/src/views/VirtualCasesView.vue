@@ -171,6 +171,24 @@ async function save() {
   }
 }
 
+// 统一提取后端错误 detail;blob 响应(下载类接口)的错误体需要异步解析。
+async function extractErrorDetail(err: unknown): Promise<string | undefined> {
+  const data = (err as { response?: { data?: unknown } })?.response?.data;
+  if (data && typeof data === "object" && "detail" in data) {
+    const detail = (data as { detail?: unknown }).detail;
+    return typeof detail === "string" ? detail : undefined;
+  }
+  if (data instanceof Blob) {
+    try {
+      const parsed = JSON.parse(await data.text()) as { detail?: unknown };
+      return typeof parsed.detail === "string" ? parsed.detail : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 async function downloadApplication(row: VirtualCase) {
   try {
     const res = await api.downloadApplication(row.id);
@@ -187,21 +205,29 @@ async function downloadApplication(row: VirtualCase) {
     a.click();
     // 延迟释放:部分浏览器立即 revoke 会导致下载失败。
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-  } catch {
-    ElMessage.error("生成失败,请先完善申请人和被申请人信息");
+  } catch (err) {
+    ElMessage.error((await extractErrorDetail(err)) ?? "生成失败,请稍后重试");
   }
 }
 
 async function markRecorded(row: VirtualCase) {
-  await api.updateVirtualCaseStatus(row.id, "recorded");
-  ElMessage.success(`${row.receipt_number} 已标记为已录入内网`);
-  await refresh();
+  try {
+    await api.updateVirtualCaseStatus(row.id, "recorded");
+    ElMessage.success(`${row.receipt_number} 已标记为已录入内网`);
+    await refresh();
+  } catch (err) {
+    ElMessage.error((await extractErrorDetail(err)) ?? "操作失败,请稍后重试");
+  }
 }
 
 async function markPending(row: VirtualCase) {
-  await api.updateVirtualCaseStatus(row.id, "pending");
-  ElMessage.success(`${row.receipt_number} 已恢复为待录入`);
-  await refresh();
+  try {
+    await api.updateVirtualCaseStatus(row.id, "pending");
+    ElMessage.success(`${row.receipt_number} 已恢复为待录入`);
+    await refresh();
+  } catch (err) {
+    ElMessage.error((await extractErrorDetail(err)) ?? "操作失败,请稍后重试");
+  }
 }
 
 async function removeCase(row: VirtualCase) {
@@ -214,9 +240,13 @@ async function removeCase(row: VirtualCase) {
   } catch {
     return;
   }
-  await api.deleteVirtualCase(row.id);
-  ElMessage.success("已删除");
-  await refresh();
+  try {
+    await api.deleteVirtualCase(row.id);
+    ElMessage.success("已删除");
+    await refresh();
+  } catch (err) {
+    ElMessage.error((await extractErrorDetail(err)) ?? "删除失败,请稍后重试");
+  }
 }
 
 function partiesText(parties: Party[]) {

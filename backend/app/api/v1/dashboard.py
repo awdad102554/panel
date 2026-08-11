@@ -32,8 +32,8 @@ from app.services.internal_case_urgency import (
     DECIDING_STEP,
     MEDIATION_STEP,
     UrgencyResult,
-    _by_days,
     compute_urgency,
+    sort_days_key,
     urgency_order,
 )
 from app.services.internal_hearing import fetch_hearings, upcoming_range
@@ -58,7 +58,8 @@ async def _count(db: AsyncSession, *where) -> int:
 
 
 async def _local_summary(db: AsyncSession) -> DashboardSummary:
-    today = date.today()
+    # 与快照路径统一用业务本地日期(CST),不用系统时区。
+    today = datetime.now(_LOCAL_TZ).date()
     soon = today + timedelta(days=7)
 
     return DashboardSummary(
@@ -220,14 +221,20 @@ _SNAPSHOT_CARD_KEYS = (
 )
 
 def _virtual_case_out(row: VirtualCase, settings: Settings, today: date) -> InternalCaseOut:
-    """预登记案件 → 卡片明细条目。紧急度按收件时限(5 天)从创建日估算,
-    与收件案件同一套分档;环节标记为 virtual(预登记)。"""
+    """预登记案件 → 卡片明细条目。紧急度按登记后的自然日数分档(阈值见时限设置
+    virtual_case_soon_days / virtual_case_urgent_days,默认 30/60 天):超过临近阈值
+    标"临近",超过紧急阈值标"紧急";days_remaining 存距紧急阈值的天数。环节标记为 virtual(预登记)。"""
     created_at = row.created_at
     if created_at.tzinfo is None:
         created_at = created_at.replace(tzinfo=timezone.utc)
     elapsed = (today - created_at.astimezone(_LOCAL_TZ).date()).days
-    remaining = settings.case_urgency_receive_days - elapsed
-    urgency = _by_days(remaining, settings.case_urgency_soon_days, settings.case_urgency_urgent_days)
+    if elapsed >= settings.virtual_case_urgent_days:
+        urgency = "urgent"
+    elif elapsed >= settings.virtual_case_soon_days:
+        urgency = "soon"
+    else:
+        urgency = "normal"
+    remaining = settings.virtual_case_urgent_days - elapsed
     applicants = row.applicants or []
     respondents = row.respondents or []
     return InternalCaseOut(
@@ -235,8 +242,8 @@ def _virtual_case_out(row: VirtualCase, settings: Settings, today: date) -> Inte
         stage=InternalStage.VIRTUAL,
         current_step="待录入内网",
         case_no=row.receipt_number,
-        applicant="、".join(p.get("name", "") for p in applicants if p.get("name")) or None,
-        respondent="、".join(p.get("name", "") for p in respondents if p.get("name")) or None,
+        applicant="、".join(p.get("name", "") for p in applicants if isinstance(p, dict) and p.get("name")) or None,
+        respondent="、".join(p.get("name", "") for p in respondents if isinstance(p, dict) and p.get("name")) or None,
         is_paused=False,
         native_remaining_days=None,
         extension_days=0,
@@ -395,7 +402,7 @@ async def list_card_cases(
         ]
         items.extend(virtual_items)
         items.sort(
-            key=lambda c: (urgency_order(c.urgency), c.days_remaining is None, c.days_remaining or 0)
+            key=lambda c: (urgency_order(c.urgency), c.days_remaining is None, sort_days_key(c.urgency, c.days_remaining))
         )
     return items
 
@@ -473,10 +480,10 @@ async def _build_case_list(
     db: AsyncSession,
     matched: list[tuple[UrgencyResult, InternalCaseTracking]],
 ) -> list[InternalCaseOut]:
-    """排序(紧急度权重升序,同档剩余天数少的靠前)并组装输出,卡片/图表明细共用。"""
+    """排序(紧急度权重升序,同档剩余天数少的靠前;中止档位已中止天数久的靠前)并组装输出,卡片/图表明细共用。"""
     overrides = await _load_overrides(db)
     matched.sort(
-        key=lambda item: (item[0].order, item[0].days_remaining is None, item[0].days_remaining or 0)
+        key=lambda item: (item[0].order, item[0].days_remaining is None, sort_days_key(item[0].urgency, item[0].days_remaining))
     )
     return [
         _build_out(

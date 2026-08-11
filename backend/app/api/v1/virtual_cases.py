@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from starlette.background import BackgroundTask
@@ -89,6 +89,31 @@ class VirtualCaseOut(BaseModel):
     updated_at: datetime
 
 
+def _parse_parties(items: list | None) -> list[PartyIn]:
+    """逐条解析当事人 JSON;单条脏数据跳过并记日志,不让整条案件(乃至整个列表)500。"""
+    out: list[PartyIn] = []
+    for p in items or []:
+        if not isinstance(p, dict) or not p.get("name"):
+            continue
+        try:
+            out.append(PartyIn(**p))
+        except ValidationError:
+            logger.warning("预登记当事人数据异常,已跳过: %s", p.get("name"))
+    return out
+
+
+def _parse_evidences(items: list | None) -> list[EvidenceIn]:
+    out: list[EvidenceIn] = []
+    for e in items or []:
+        if not isinstance(e, dict) or not e.get("name"):
+            continue
+        try:
+            out.append(EvidenceIn(**e))
+        except ValidationError:
+            logger.warning("预登记证据数据异常,已跳过: %s", e.get("name"))
+    return out
+
+
 def _to_out(row: VirtualCase) -> VirtualCaseOut:
     return VirtualCaseOut(
         id=row.id,
@@ -97,9 +122,9 @@ def _to_out(row: VirtualCase) -> VirtualCaseOut:
         case_reason=row.case_reason,
         claims=row.claims,
         note=row.note,
-        applicants=[PartyIn(**p) for p in (row.applicants or []) if isinstance(p, dict) and p.get("name")],
-        respondents=[PartyIn(**p) for p in (row.respondents or []) if isinstance(p, dict) and p.get("name")],
-        evidences=[EvidenceIn(**e) for e in (row.evidences or []) if isinstance(e, dict) and e.get("name")],
+        applicants=_parse_parties(row.applicants),
+        respondents=_parse_parties(row.respondents),
+        evidences=_parse_evidences(row.evidences),
         created_by=row.created_by,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -164,14 +189,17 @@ async def create_virtual_case(
             created_by=current_user.username,
         )
         db.add(row)
-        try:
-            await db.commit()
-        except IntegrityError:
-            # 并发撞号兜底:回滚后重新取号再提交一次。
-            await db.rollback()
-            row.receipt_number = await _next_receipt_number(db)
-            db.add(row)
-            await db.commit()
+        # 并发撞号兜底:回滚后重新取号再试,最多 3 次(此前只重试一次,极端并发仍可能 500)。
+        for attempt in range(3):
+            try:
+                await db.commit()
+                break
+            except IntegrityError:
+                await db.rollback()
+                if attempt == 2:
+                    raise HTTPException(status_code=500, detail="预登记编号生成冲突,请重试")
+                row.receipt_number = await _next_receipt_number(db)
+                db.add(row)
         return _to_out(row)
 
 
@@ -255,8 +283,8 @@ async def download_application(
         row = await db.get(VirtualCase, case_id)
         if row is None:
             raise HTTPException(status_code=404, detail="预登记案件不存在")
-        applicants = row.applicants or []
-        respondents = row.respondents or []
+        applicants = [p for p in (row.applicants or []) if isinstance(p, dict) and p.get("name")]
+        respondents = [p for p in (row.respondents or []) if isinstance(p, dict) and p.get("name")]
         if not applicants or not respondents:
             raise HTTPException(status_code=422, detail="请先完善申请人和被申请人信息")
 
@@ -268,11 +296,17 @@ async def download_application(
     )
     tmp_path = Path(tmp.name)
     tmp.close()
-    await run_in_threadpool(
-        generate_application,
-        {"applicants": applicants, "respondents": respondents},
-        tmp_path,
-    )
+    try:
+        await run_in_threadpool(
+            generate_application,
+            {"applicants": applicants, "respondents": respondents},
+            tmp_path,
+        )
+    except Exception:
+        # 生成失败要删掉已创建的空临时文件,否则 /tmp 会缓慢堆积。
+        tmp_path.unlink(missing_ok=True)
+        logger.exception("生成仲裁申请书失败: %s", case_id)
+        raise HTTPException(status_code=500, detail="仲裁申请书生成失败,请检查案件信息是否完整")
     return FileResponse(
         tmp_path,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",

@@ -79,6 +79,8 @@ async def lifespan(app: FastAPI):
     finally:
         task.cancel()
         pause_task.cancel()
+        # 等任务真正结束,避免关闭时循环正持 DB 会话 mid-sync 被打断告警。
+        await asyncio.gather(task, pause_task, return_exceptions=True)
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -89,6 +91,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # 暴露下载文件名头:跨域直连时前端才能从 content-disposition 取到文件名。
+    expose_headers=["Content-Disposition"],
 )
 
 app.include_router(api_router, prefix=settings.api_prefix)
