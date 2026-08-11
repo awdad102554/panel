@@ -268,7 +268,7 @@ def _main_cause_array(main_causes: list[str]) -> list:
 
 # ---------------------------------------------------------------- 关键词猜测
 
-_AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*元")
+_AMOUNT_RE = re.compile(r"([\d,]+(?:\.\d+)?)\s*(万)?元")
 
 
 def _norm_text(s: str) -> str:
@@ -315,14 +315,20 @@ def guess_request(text: str, catalog: list[dict]) -> dict | None:
 
 
 def guess_amount(text: str, option: str | None) -> float | None:
-    """从自由文本猜标的金额:优先取匹配选项之后最近的"N元",否则取第一个。"""
+    """从自由文本猜标的金额:优先取匹配选项之后最近的"N元",否则取第一个。
+    支持千分位逗号与"万元"("2万元"=20000)。"""
     t = _norm_text(text)
     start = t.find(_norm_text(option)) if option else -1
     seg = t[start:] if start >= 0 else t
     m = _AMOUNT_RE.search(seg)
     if m is None and start >= 0:
         m = _AMOUNT_RE.search(t)
-    return float(m.group(1)) if m else None
+    if m is None:
+        return None
+    value = float(m.group(1).replace(",", ""))
+    if m.group(2):
+        value *= 10000
+    return value
 
 
 # ---------------------------------------------------------------- 请求体组装
@@ -376,7 +382,12 @@ def _fill_template(
     if "标的" in out:
         if obj is None:
             return None
-        out = out.replace("标的", _fmt_amount(obj))
+        # 优先整替"标的元"(占位形态),避免误伤"标的额"等非占位语境与
+        # 选项文本中可能含有的"标的"二字。
+        if "标的元" in out:
+            out = out.replace("标的元", f"{_fmt_amount(obj)}元")
+        else:
+            out = out.replace("标的", _fmt_amount(obj))
     if not out.endswith("。"):
         out += "。"
     return out
@@ -560,11 +571,14 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
         elif req.option and req.option not in option_names:
             raise ValueError(f"第四级选项不在字典中: {req.option}")
 
-        # 多选项($str 模板):object 为空时按各项金额求和(样例2 工伤待遇)。
+        # 多选项($str 模板):每项都必须有金额,否则拒绝(缺金额时静默求部分和会
+        # 造成"总额≠明细之和"的不一致数据进内网,自检发现 2026-08-11)。
+        if req.items and any(i.object is None for i in req.items):
+            raise ValueError(f"多选项请求的每个费用项都需要金额: {req.text[:20]}")
+        # object 为空时按各项金额求和(样例2 工伤待遇)。
         obj = req.object
         if req.items and obj is None:
-            amounts = [i.object for i in req.items if i.object is not None]
-            obj = sum(amounts) if amounts else None
+            obj = sum(i.object for i in req.items)
         names = [i.name for i in req.items] if req.items else ([req.option] if req.option else [])
         level4_arr = (
             [{"name": i.name, "object": i.object} for i in req.items]
@@ -686,13 +700,26 @@ async def _fill_company_info(applicants: list[dict], respondents: list[dict]) ->
 
 async def build_draft(case: dict) -> dict:
     """submit-draft:自动猜测 + 企业信息回填 + 校验,供前端对话框展示/修改。"""
-    catalog, towns, case_reasons, company_natures, worker_id_types = await asyncio.gather(
-        get_request_catalog(),
+    # catalog 是必需的(请求类型猜测/组装都靠它);towns/案由等仅作前端下拉,
+    # 拉取失败降级为空列表,不拖垮整个草稿(自检发现 2026-08-11)。
+    catalog = await get_request_catalog()
+    towns, case_reasons, company_natures, worker_id_types = await asyncio.gather(
         get_towns(),
         get_norm_dict("case_reason"),
         get_norm_dict("company_nature"),
         get_norm_dict("worker_id_type"),
+        return_exceptions=True,
     )
+    for name, value in (
+        ("乡镇", towns), ("案由", case_reasons),
+        ("企业性质", company_natures), ("证件类型", worker_id_types),
+    ):
+        if isinstance(value, Exception):
+            logger.warning("提交草稿字典降级[%s]: %s", name, value)
+    towns = towns if isinstance(towns, list) else []
+    case_reasons = case_reasons if isinstance(case_reasons, list) else []
+    company_natures = company_natures if isinstance(company_natures, list) else []
+    worker_id_types = worker_id_types if isinstance(worker_id_types, list) else []
     applicants = [dict(p) for p in case.get("applicants") or []]
     respondents = [dict(p) for p in case.get("respondents") or []]
 
@@ -742,14 +769,18 @@ async def build_draft(case: dict) -> dict:
         if not r["guessed"]:
             warnings.append(f"仲裁请求未能自动匹配类型,请人工选择: {r['text'][:30]}")
 
-    # 案由默认值:优先案件已填且能在字典里精确/模糊匹配的值。
+    # 案由默认值:优先案件已填且能在字典里精确/模糊匹配的值;匹配不上置空并提示
+    # (原值静默丢弃会让用户以为案由已选好)。
     case_reason = case.get("case_reason") or ""
     dict_names = [d["name"] for d in case_reasons]
     if case_reason and case_reason not in dict_names:
-        case_reason = next(
+        matched = next(
             (n for n in dict_names if case_reason and (case_reason in n or n in case_reason)),
             "",
         )
+        if not matched:
+            warnings.append(f"已填案由[{case_reason}]不在内网字典中,请人工选择")
+        case_reason = matched
 
     return {
         "defaults": {

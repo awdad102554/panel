@@ -61,6 +61,8 @@ class AgentIn(BaseModel):
     lawer_type: int | None = None  # 1执业律师 2实习律师(内网字段拼写如此)
     is_legal_aid: int | None = None  # 法律援助 0/1
     lawyer_card_number: str | None = None  # 律师执业证号
+    nation: str | None = None  # 民族
+    birth: str | None = None  # 出生日期
     address: str | None = None  # 住址
     receive_address: str | None = None  # 送达地址
     job: str | None = None
@@ -123,11 +125,23 @@ class VirtualCaseOut(BaseModel):
 
 
 def _parse_parties(items: list | None) -> list[PartyIn]:
-    """逐条解析当事人 JSON;单条脏数据跳过并记日志,不让整条案件(乃至整个列表)500。"""
+    """逐条解析当事人 JSON;单条脏数据跳过并记日志,不让整条案件(乃至整个列表)500。
+
+    agents 先逐条清洗:一条脏 agent 不该拖垮整个当事人(否则出现"页面看不到、
+    提交(_row_to_case_dict 原始 JSON)却带上"的矛盾,自检发现 2026-08-11)。
+    """
     out: list[PartyIn] = []
     for p in items or []:
         if not isinstance(p, dict) or not p.get("name"):
             continue
+        p = dict(p)
+        agents: list[AgentIn] = []
+        for a in p.get("agents") or []:
+            try:
+                agents.append(AgentIn(**a))
+            except (ValidationError, TypeError):
+                logger.warning("预登记代理人数据异常,已跳过: %s", (a or {}).get("name") if isinstance(a, dict) else a)
+        p["agents"] = agents
         try:
             out.append(PartyIn(**p))
         except ValidationError:
@@ -222,7 +236,9 @@ async def create_virtual_case(
             created_by=current_user.username,
         )
         db.add(row)
-        # 并发撞号兜底:回滚后重新取号再试,最多 3 次(此前只重试一次,极端并发仍可能 500)。
+        # 并发撞号兜底:回滚后 expunge 再改号重加(rollback 后直接 add 原对象是
+        # no-op,会发 UPDATE 0 行抛 StaleDataError——此前兜底路径一触发就 500),
+        # 最多 3 次。
         for attempt in range(3):
             try:
                 await db.commit()
@@ -231,6 +247,7 @@ async def create_virtual_case(
                 await db.rollback()
                 if attempt == 2:
                     raise HTTPException(status_code=500, detail="预登记编号生成冲突,请重试")
+                db.expunge(row)
                 row.receipt_number = await _next_receipt_number(db)
                 db.add(row)
         return _to_out(row)
@@ -388,7 +405,11 @@ async def submit_preview(
         if row is None:
             raise HTTPException(status_code=404, detail="预登记案件不存在")
         case = _row_to_case_dict(row)
-    catalog = await get_request_catalog()
+    try:
+        catalog = await get_request_catalog()
+    except CaseSystemError as exc:
+        logger.warning("预览字典拉取失败: %s", exc)
+        raise HTTPException(status_code=502, detail="内网字典服务不可用,请稍后重试") from exc
     applicants = [dict(p) for p in case["applicants"]]
     respondents = [dict(p) for p in case["respondents"]]
     # 与正式提交一致:预览也做企业信息回填。
@@ -398,6 +419,9 @@ async def submit_preview(
         return build_payload(case, spec, catalog)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("预览请求体组装失败[%s]", case_id)
+        raise HTTPException(status_code=422, detail=f"请求体组装失败: {exc}") from exc
 
 
 @router.post("/{case_id}/submit")
@@ -406,7 +430,12 @@ async def submit_to_internal(
     spec: SubmitSpec,
     _current_user: User = Depends(get_current_user),
 ) -> dict:
-    """正式提交到内网收件(receive/add);成功后预登记置为 recorded。"""
+    """正式提交到内网收件(receive/add);成功后预登记置为 recorded。
+
+    事务与网络调用分离:先读案件关 session 再提交内网(避免持库等网络放大
+    SQLite locked),内网成功后再开新 session 落状态;状态落库失败不影响已建案
+    事实,返回 warning 让前端提示人工核对(自检发现 2026-08-11)。
+    """
     async with VirtualSessionLocal() as db:
         row = await db.get(VirtualCase, case_id)
         if row is None:
@@ -414,20 +443,33 @@ async def submit_to_internal(
         if row.status == "recorded":
             raise HTTPException(status_code=409, detail="该案件已录入内网,请勿重复提交")
         case = _row_to_case_dict(row)
-        try:
-            data = await submit_case(case, spec)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except DuplicateCaseWarning as exc:
-            # 内网提示疑似重复案件:返回 409,前端弹确认后带 force=true 重试。
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except CaseSystemError as exc:
-            logger.warning("提交内网收件失败[%s]: %s", row.receipt_number, exc)
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        row.status = "recorded"
-        row.note = (row.note or "") + f" [已提交内网收件 {datetime.now():%Y-%m-%d %H:%M}]"
-        await db.commit()
-    return {"code": 200, "data": data}
+        receipt_number = row.receipt_number
+    try:
+        data = await submit_case(case, spec)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DuplicateCaseWarning as exc:
+        # 内网提示疑似重复案件:返回 409,前端弹确认后带 force=true 重试。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CaseSystemError as exc:
+        logger.warning("提交内网收件失败[%s]: %s", receipt_number, exc)
+        message = str(exc)
+        # 网络层失败(超时/不可达)时请求可能已到内网并建案,不能笼统报失败。
+        if "request_failed" in message or "retry_failed" in message:
+            message = "内网响应异常,提交结果未知——请先到内网收件列表核实是否已生成,避免重复提交"
+        raise HTTPException(status_code=502, detail=message) from exc
+
+    warning = None
+    try:
+        async with VirtualSessionLocal() as db:
+            row = await db.get(VirtualCase, case_id)
+            row.status = "recorded"
+            row.note = (row.note or "") + f" [已提交内网收件 {datetime.now():%Y-%m-%d %H:%M}]"
+            await db.commit()
+    except Exception:
+        logger.exception("内网已建案但预登记状态更新失败[%s]: %s", receipt_number, data)
+        warning = "内网已生成收件,但本地状态更新失败,请人工核对后标记已录入"
+    return {"code": 200, "data": data, "warning": warning}
 
 
 @router.get("/lookup/person")

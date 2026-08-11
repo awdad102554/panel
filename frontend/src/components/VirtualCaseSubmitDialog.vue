@@ -153,12 +153,16 @@ function itemsSum(row: RequestRow): number | null {
 }
 
 function onPathChange(row: RequestRow) {
-  // 换了类型后,原第四级选项大概率不再适用,清空重选。
+  // 换了类型后,原第四级选项/金额/期间大概率不再适用,清空重选
+  // (陈旧金额随新类型提交会产生错误数据)。
   const item = catalogItemOf(row.path);
   if (row.option && !(item?.options ?? []).includes(row.option)) {
     row.option = null;
   }
   row.items = [];
+  row.object = null;
+  row.start_at = null;
+  row.end_at = null;
 }
 
 const canSubmit = computed(
@@ -166,8 +170,14 @@ const canSubmit = computed(
     !!draft.value &&
     draft.value.errors.length === 0 &&
     !!form.value.case_reason &&
+    !!form.value.apply_at &&
     requestRows.value.length > 0 &&
-    requestRows.value.every((r) => r.path.length === 3),
+    requestRows.value.every(
+      (r) =>
+        r.path.length === 3 &&
+        // 多选项($str)请求必须每项都有金额,否则总额/明细不一致进内网。
+        (!isMulti(r) || (r.items.length > 0 && r.items.every((i) => i.object != null))),
+    ),
 );
 
 function buildSpec(): SubmitSpec {
@@ -209,7 +219,7 @@ function composeFacts() {
   const parts = draft.value?.fact_parts;
   if (!parts) return;
   const fmtAmount = (v: string | null) => {
-    const n = parseFloat(String(v ?? "").replace(",", ""));
+    const n = parseFloat(String(v ?? "").replace(/,/g, ""));
     return Number.isFinite(n) ? String(n) : null;
   };
   const segs: string[] = [];
@@ -271,7 +281,7 @@ async function submitWithSpec(spec: SubmitSpec) {
   } catch (err: unknown) {
     const resp = (err as { response?: { status?: number; data?: { detail?: string } } })?.response;
     // 内网提示疑似重复案件:让用户确认后带 force 重试(与内网前端流程一致)。
-    if (resp?.status === 409 && resp.data?.detail) {
+    if (resp?.status === 409 && resp.data?.detail && !spec.force) {
       try {
         await ElMessageBox.confirm(resp.data.detail, "内网提示", {
           type: "warning",
@@ -324,7 +334,7 @@ const companyFillText = computed(() => {
         <div class="field-grid">
           <div class="field">
             <label>申请日期</label>
-            <el-date-picker v-model="form.apply_at" type="date" value-format="YYYY-MM-DD" style="width: 100%" />
+            <el-date-picker v-model="form.apply_at" type="date" value-format="YYYY-MM-DD" :clearable="false" style="width: 100%" />
           </div>
           <div class="field">
             <label>乡镇街道</label>

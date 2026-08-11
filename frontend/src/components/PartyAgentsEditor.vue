@@ -39,7 +39,7 @@ function emptyAgent(): Agent {
     agent_auth: null,
     law_firm_name: null,
     lawer_type: null,
-    is_legal_aid: null,
+    is_legal_aid: 0,
     lawyer_card_number: null,
     address: null,
     receive_address: null,
@@ -49,6 +49,21 @@ function emptyAgent(): Agent {
 
 function isLawyer(a: Agent) {
   return a.agent_type === 6 || a.agent_type === 7;
+}
+
+// 手动切换类型时同样清理互斥字段组(与 pick 回填一致)。
+function onTypeChange(a: Agent) {
+  if (isLawyer(a)) {
+    a.relation = null;
+    a.select_other_content = null;
+  } else {
+    a.law_firm_name = null;
+    a.lawer_type = null;
+    a.is_legal_aid = null;
+    a.lawyer_card_number = null;
+    a.agent_auth = null;
+    a.receive_address = null;
+  }
 }
 
 function add() {
@@ -84,7 +99,7 @@ async function doQuery() {
   queryLoading.value = true;
   try {
     const kw = queryKeyword.value.trim();
-    const params = /^\d{15,18}[\dXx]?$/.test(kw)
+    const params = /^(\d{15}|\d{17}[\dXx])$/.test(kw)
       ? { id_number: kw }
       : /^1\d{10}$/.test(kw)
         ? { mobile: kw }
@@ -126,6 +141,18 @@ function pick(rec: AgentRecord) {
   a.address = rec.address || rec.registered_permanent_residence || a.address;
   a.receive_address = rec.receive_address || a.receive_address;
   a.job = rec.job || a.job;
+  // 律师类与非法律类的专属字段互斥,清掉不适用组,避免不可见脏数据随提交。
+  if (isLawyer(a)) {
+    a.relation = null;
+    a.select_other_content = null;
+  } else {
+    a.law_firm_name = null;
+    a.lawer_type = null;
+    a.is_legal_aid = null;
+    a.lawyer_card_number = null;
+    a.agent_auth = null;
+    a.receive_address = null;
+  }
   queryVisible.value = false;
   ElMessage.success(`已回填:${rec.name}`);
 }
@@ -148,7 +175,7 @@ function typeLabel(code: number) {
       <div class="agent-grid">
         <div class="field">
           <label>代理人类型 *</label>
-          <el-select v-model="a.agent_type">
+          <el-select v-model="a.agent_type" @change="onTypeChange(a)">
             <el-option v-for="t in AGENT_TYPES" :key="t.code" :label="t.label" :value="t.code" />
           </el-select>
         </div>

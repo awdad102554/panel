@@ -110,6 +110,35 @@ def test_guess_amount_prefers_option_context():
     text = "被申请人支付申请人违法解除劳动合同赔偿金 4600元。（计算标准：2300 × 1 个月 × 2 = 4600元）"
     assert guess_amount(text, "违法解除劳动合同赔偿金") == 4600.0
     assert guess_amount("没有金额的描述", None) is None
+    # 万元与千分位
+    assert guess_amount("拖欠工资2万元", None) == 20000.0
+    assert guess_amount("赔偿金10,000元", None) == 10000.0
+
+
+def test_items_missing_amount_rejected():
+    """多选项请求任一项缺金额必须拒绝(静默求部分和会造成总额≠明细)。"""
+    leaf = {
+        "path": [
+            {"id": 1, "code": "1", "name": "劳动争议"},
+            {"id": 11, "code": "2", "name": "社会保险争议"},
+            {"id": 12, "code": "3", "name": "工伤保险待遇争议"},
+        ],
+        "options": ["医疗费", "住院期间伙食补助费"],
+        "template": "请求裁决被申请人向申请人支付工伤保险待遇共计标的元（其中：$str）",
+    }
+    spec = SubmitSpec(
+        apply_at=date(2026, 8, 10),
+        case_reason="确认劳动关系",
+        requests=[
+            RequestSpec(
+                text="工伤待遇",
+                path_ids=[1, 11, 12],
+                items=[RequestItem(name="医疗费", object=100), RequestItem(name="住院期间伙食补助费")],
+            )
+        ],
+    )
+    with pytest.raises(ValueError, match="每个费用项都需要金额"):
+        build_payload(CASE, spec, CATALOG + [leaf])
 
 
 def test_fill_template():

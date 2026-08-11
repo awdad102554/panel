@@ -166,12 +166,21 @@ async function save() {
   try {
     const applicantsClean = applicants.value.map((p) => ({
       ...p,
+      name: p.name.trim(),
+      claims: null, // claims 已迁移进 requests(fillRequests),清掉避免数据重复残留
       requests: (p.requests ?? []).filter((r) => r.trim()),
     }));
     // 被申请人卡片不展示请求行,清掉继承自申请人结构的空 requests,避免脏数据入库。
-    const respondentsClean = respondents.value.map((p) => ({ ...p, requests: [] }));
+    const respondentsClean = respondents.value.map((p) => ({
+      ...p,
+      name: p.name.trim(),
+      requests: [],
+    }));
     const payload = {
-      case_reason: null,
+      // 编辑表单没有案由字段:编辑时保留原值,不静默清掉。
+      case_reason: editingId.value
+        ? (cases.value.find((c) => c.id === editingId.value)?.case_reason ?? null)
+        : null,
       claims: null,
       note: form.value.note || null,
       applicants: applicantsClean,
