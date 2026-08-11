@@ -45,12 +45,13 @@ const cards = [
 type CardKey = (typeof cards)[number]["key"];
 
 // 明细弹窗顶部的口径提示;无特殊说明的卡片不显示。
-const CARD_HINTS: Partial<Record<CardKey, string>> = {
-  due_reminders: "时效维度需要处理的事项:已超期(含审批退回需返工的案件)、紧急(剩1天)、临近(剩3天内)。",
-  pending_receive: "收件环节待审核、尚未立案的案件,需要工作人员审查推进;已处理/已退回的收件不在此列。",
+// 阈值类文案按"时限设置"的当前生效值动态生成,随设置变化。
+const CARD_HINTS = computed<Partial<Record<CardKey, string>>>(() => ({
+  due_reminders: `时效维度需要处理的事项:已超期(含审批退回需返工的案件)、紧急(剩${urgentDays.value}天内)、临近(剩${soonDays.value}天内)。`,
+  pending_receive: "收件环节待审核、尚未立案的案件,以及待录入内网的预登记案件;已处理/已退回的收件和已录入的预登记不在此列。",
   open_cases: "已立案、尚未结案的全部在办案件(含中止/调解/裁决中等子状态),按紧急度排序。",
-  paused_long: "审理中止超过 15 天阈值的案件,需要跟进是否恢复审理。",
-};
+  paused_long: `审理中止超过 ${pausedAlertDays.value} 天阈值的案件,需要跟进是否恢复审理。`,
+}));
 
 const hearingDialogVisible = ref(false);
 const hearingLoading = ref(false);
@@ -64,7 +65,7 @@ function openCard(key: CardKey, label: string) {
     openHearings();
     return;
   }
-  caseDialog.value?.open(label, CARD_HINTS[key] ?? "", () => dashboardApi.getCardCases(key));
+  caseDialog.value?.open(label, CARD_HINTS.value[key] ?? "", () => dashboardApi.getCardCases(key));
 }
 
 function onChartShowCases(req: ChartCasesRequest) {
@@ -93,6 +94,17 @@ function hearingTime(openAt: string, endAt: string | null) {
 
 onMounted(async () => {
   summary.value = await dashboardApi.getDashboardSummary();
+  // 读取时限设置,让明细弹窗的口径文案与实际阈值一致。
+  try {
+    const limits = await getTimeLimits();
+    for (const item of limits) {
+      if (item.key === "case_urgency_urgent_days") urgentDays.value = item.value;
+      else if (item.key === "case_urgency_soon_days") soonDays.value = item.value;
+      else if (item.key === "case_urgency_paused_alert_days") pausedAlertDays.value = item.value;
+    }
+  } catch {
+    // 读取失败用默认文案数值,不影响页面。
+  }
 });
 </script>
 

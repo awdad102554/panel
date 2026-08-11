@@ -40,11 +40,15 @@ class Settings(BaseSettings):
     # 内网案件监控——同步与时效阈值配置(已按工作人员确认口径设置,可通过 .env 覆盖)。
     case_sync_interval_minutes: int = 60  # 后台定时同步间隔(分钟)
     case_urgency_reserve_days: int = 3  # 线上预约阶段时限(只定超期点;警告起点用统一的临近/紧急阈值)
-    case_urgency_receive_days: int = 5  # 收件审查阶段:时限 5 个工作日(以内网原生 receive_time_limit 为准)
+    case_urgency_receive_days: int = 5  # 收件审查阶段:时限 5 天(自然日;以内网原生 receive_time_limit 为准)
     case_urgency_soon_days: int = 3  # handle 阶段:剩余审理天数≤多少天算"临近"
     case_urgency_urgent_days: int = 1  # handle 阶段:剩余审理天数≤多少天升级"紧急"(需小于临近阈值)
     case_urgency_paused_alert_days: int = 15  # 审理中止:暂停超过多少天需要提醒(标"中止XX天")
     case_mediation_alert_days: int = 30  # 组织调解:进入调解环节超过多少天需提醒(约一个月)
+
+    # 预登记案件警告阈值(按登记后的自然日数):超过临近阈值标"临近",超过紧急阈值标"紧急"。
+    virtual_case_soon_days: int = 30  # 预登记临近阈值(天)
+    virtual_case_urgent_days: int = 60  # 预登记紧急阈值(天,需大于临近阈值)
 
 
 @lru_cache
