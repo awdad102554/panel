@@ -4,9 +4,18 @@ import { onMounted, ref } from "vue";
 
 import * as api from "@/api/virtualCases";
 import type { Evidence, Party, VirtualCase } from "@/api/virtualCases";
+import VirtualCaseSubmitDialog from "@/components/VirtualCaseSubmitDialog.vue";
 
 const cases = ref<VirtualCase[]>([]);
 const loading = ref(false);
+
+const submitVisible = ref(false);
+const submitTarget = ref<VirtualCase | null>(null);
+
+function openSubmit(row: VirtualCase) {
+  submitTarget.value = row;
+  submitVisible.value = true;
+}
 
 const dialogVisible = ref(false);
 const editingId = ref<string | null>(null);
@@ -273,7 +282,7 @@ onMounted(refresh);
       <h2>预登记案件</h2>
       <p class="hint">
         暂不录入内网系统的案件可在此预登记,记录案件信息与进度,数据仅保存在本系统的独立文件数据库(SQLite),不与内网同步。待录入的案件会计入案件总览的"待办案件"卡片,录入内网后点"标记已录入"退出待办。
-        当事人信息可通过身份证号/企业名称(或信用代码)调用内部接口查询自动填充。
+        当事人信息可通过身份证号/企业名称(或信用代码)调用内部接口查询自动填充。案件信息完整后可点"提交到内网"直接写入内网收件,无需在内网重复录入。
       </p>
     </div>
 
@@ -300,10 +309,18 @@ onMounted(refresh);
       <el-table-column label="登记时间" width="110">
         <template #default="{ row }">{{ row.created_at?.slice(0, 10) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="330">
+      <el-table-column label="操作" width="420">
         <template #default="{ row }">
           <el-button size="small" @click="openEdit(row)">编辑</el-button>
           <el-button size="small" type="primary" plain @click="downloadApplication(row)">生成申请书</el-button>
+          <el-button
+            v-if="row.status === 'pending'"
+            size="small"
+            type="success"
+            @click="openSubmit(row)"
+          >
+            提交到内网
+          </el-button>
           <el-button
             v-if="row.status === 'pending'"
             size="small"
@@ -318,6 +335,14 @@ onMounted(refresh);
         </template>
       </el-table-column>
     </el-table>
+
+    <VirtualCaseSubmitDialog
+      v-if="submitTarget"
+      v-model:visible="submitVisible"
+      :case-id="submitTarget.id"
+      :receipt-number="submitTarget.receipt_number"
+      @submitted="refresh"
+    />
 
     <el-dialog
       v-model="dialogVisible"

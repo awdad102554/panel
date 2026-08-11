@@ -1,0 +1,396 @@
+<script setup lang="ts">
+import { ElMessage, ElMessageBox } from "element-plus";
+import { computed, ref, watch } from "vue";
+
+import * as api from "@/api/virtualCases";
+import type { CatalogItem, SubmitDraft, SubmitSpec } from "@/api/virtualCases";
+
+const props = defineProps<{
+  visible: boolean;
+  caseId: string;
+  receiptNumber: string;
+}>();
+const emit = defineEmits<{
+  "update:visible": [value: boolean];
+  submitted: [];
+}>();
+
+const loading = ref(false);
+const submitting = ref(false);
+const draft = ref<SubmitDraft | null>(null);
+
+// 表单状态(草稿加载后填充,用户确认/修改)
+const form = ref({
+  apply_at: "",
+  town_id: 0,
+  case_reason: "",
+  is_sign_labor_contract: 1,
+  is_pay_social_insurance: 1,
+  company_nature: "私营企业",
+});
+interface RequestRow {
+  text: string;
+  path: number[]; // cascader 绑定
+  option: string | null;
+  object: number | null;
+  intro: string | null;
+  guessed: boolean;
+}
+const requestRows = ref<RequestRow[]>([]);
+
+const previewVisible = ref(false);
+const previewJson = ref("");
+
+watch(
+  () => props.visible,
+  async (v) => {
+    if (!v) return;
+    loading.value = true;
+    draft.value = null;
+    try {
+      const d = await api.fetchSubmitDraft(props.caseId);
+      draft.value = d;
+      form.value = {
+        apply_at: d.defaults.apply_at,
+        town_id: d.defaults.town_id,
+        case_reason: d.defaults.case_reason,
+        is_sign_labor_contract: d.defaults.is_sign_labor_contract,
+        is_pay_social_insurance: d.defaults.is_pay_social_insurance,
+        company_nature: d.defaults.company_nature,
+      };
+      requestRows.value = d.requests.map((r) => ({
+        text: r.text,
+        path: r.path_ids ? [...r.path_ids] : [],
+        option: r.option,
+        object: r.object,
+        intro: r.intro,
+        guessed: r.guessed,
+      }));
+    } catch (err: unknown) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      ElMessage.error(detail ?? "草稿加载失败,请稍后重试");
+      emit("update:visible", false);
+    } finally {
+      loading.value = false;
+    }
+  },
+);
+
+// 仲裁请求类型树 → el-cascader 选项(三级)
+interface CascaderNode {
+  value: number;
+  label: string;
+  children?: CascaderNode[];
+}
+const cascaderOptions = computed<CascaderNode[]>(() => {
+  const catalog = draft.value?.meta.catalog ?? [];
+  const l1map = new Map<number, CascaderNode>();
+  const l2map = new Map<string, CascaderNode>();
+  for (const item of catalog) {
+    const [l1, l2, l3] = item.path;
+    if (!l1map.has(l1.id)) l1map.set(l1.id, { value: l1.id, label: l1.name, children: [] });
+    const n1 = l1map.get(l1.id)!;
+    const key2 = `${l1.id}/${l2.id}`;
+    if (!l2map.has(key2)) {
+      const n2: CascaderNode = { value: l2.id, label: l2.name, children: [] };
+      l2map.set(key2, n2);
+      n1.children!.push(n2);
+    }
+    l2map.get(key2)!.children!.push({ value: l3.id, label: l3.name });
+  }
+  return [...l1map.values()];
+});
+
+function catalogItemOf(path: number[]): CatalogItem | undefined {
+  return draft.value?.meta.catalog.find(
+    (c) => c.path.length === 3 && c.path.every((n, i) => n.id === path[i]),
+  );
+}
+
+function optionsOf(row: RequestRow): string[] {
+  return catalogItemOf(row.path)?.options ?? [];
+}
+
+function onPathChange(row: RequestRow) {
+  // 换了类型后,原第四级选项大概率不再适用,清空重选。
+  const item = catalogItemOf(row.path);
+  if (row.option && !(item?.options ?? []).includes(row.option)) {
+    row.option = null;
+  }
+}
+
+const canSubmit = computed(
+  () =>
+    !!draft.value &&
+    draft.value.errors.length === 0 &&
+    !!form.value.case_reason &&
+    requestRows.value.length > 0 &&
+    requestRows.value.every((r) => r.path.length === 3),
+);
+
+function buildSpec(): SubmitSpec {
+  return {
+    apply_at: form.value.apply_at,
+    town_id: form.value.town_id,
+    case_reason: form.value.case_reason,
+    is_sign_labor_contract: form.value.is_sign_labor_contract,
+    is_pay_social_insurance: form.value.is_pay_social_insurance,
+    company_nature: form.value.company_nature,
+    requests: requestRows.value.map((r) => ({
+      text: r.text,
+      path_ids: r.path,
+      option: r.option || null,
+      object: r.object ?? null,
+      intro: r.intro?.trim() || null,
+    })),
+  };
+}
+
+async function openPreview() {
+  try {
+    const payload = await api.submitPreview(props.caseId, buildSpec());
+    previewJson.value = JSON.stringify(payload, null, 2);
+    previewVisible.value = true;
+  } catch (err: unknown) {
+    const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+    ElMessage.error(detail ?? "预览生成失败");
+  }
+}
+
+async function doSubmit() {
+  try {
+    await ElMessageBox.confirm(
+      `确认将 ${props.receiptNumber} 提交到内网收件?提交后内网将生成正式收件记录。`,
+      "提交确认",
+      { type: "warning", confirmButtonText: "确认提交", cancelButtonText: "再检查一下" },
+    );
+  } catch {
+    return;
+  }
+  submitting.value = true;
+  try {
+    await api.submitToInternal(props.caseId, buildSpec());
+    ElMessage.success(`${props.receiptNumber} 已提交到内网收件`);
+    emit("update:visible", false);
+    emit("submitted");
+  } catch (err: unknown) {
+    const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+    ElMessage.error(detail ?? "提交失败,请稍后重试");
+  } finally {
+    submitting.value = false;
+  }
+}
+
+const companyFillText = computed(() => {
+  const fills = draft.value?.company_fills ?? [];
+  const found = fills.filter((f) => f.found);
+  if (!found.length) return "";
+  return found
+    .map((f) => `${f.name}${f.registered_capital ? `(注册资本 ${f.registered_capital} 万元)` : ""}`)
+    .join("、");
+});
+</script>
+
+<template>
+  <el-dialog
+    :model-value="visible"
+    title="提交到内网收件"
+    width="980px"
+    top="3vh"
+    @update:model-value="emit('update:visible', $event)"
+  >
+    <div v-loading="loading" class="submit-body">
+      <template v-if="draft">
+        <el-alert v-if="draft.errors.length" type="error" :closable="false" class="mb">
+          <div v-for="(e, i) in draft.errors" :key="i">✕ {{ e }}(请返回编辑补齐后再提交)</div>
+        </el-alert>
+        <el-alert v-if="draft.warnings.length" type="warning" :closable="false" class="mb">
+          <div v-for="(w, i) in draft.warnings" :key="i">⚠ {{ w }}</div>
+        </el-alert>
+        <el-alert v-if="companyFillText" type="success" :closable="false" class="mb">
+          已通过查企业接口回填:{{ companyFillText }}
+        </el-alert>
+
+        <div class="section-title">基本信息</div>
+        <div class="field-grid">
+          <div class="field">
+            <label>申请日期</label>
+            <el-date-picker v-model="form.apply_at" type="date" value-format="YYYY-MM-DD" style="width: 100%" />
+          </div>
+          <div class="field">
+            <label>乡镇街道</label>
+            <el-select v-model="form.town_id" filterable>
+              <el-option
+                v-for="t in draft.meta.towns"
+                :key="t.town_id"
+                :label="t.town_name"
+                :value="t.town_id"
+              />
+            </el-select>
+          </div>
+          <div class="field">
+            <label>案由 *</label>
+            <el-select v-model="form.case_reason" filterable placeholder="请选择案由">
+              <el-option v-for="r in draft.meta.case_reasons" :key="r" :label="r" :value="r" />
+            </el-select>
+          </div>
+          <div class="field">
+            <label>企业性质</label>
+            <el-select v-model="form.company_nature" filterable>
+              <el-option v-for="n in draft.meta.company_natures" :key="n" :label="n" :value="n" />
+            </el-select>
+          </div>
+          <div class="field">
+            <label>签订劳动合同</label>
+            <el-switch
+              v-model="form.is_sign_labor_contract"
+              :active-value="1"
+              :inactive-value="0"
+              active-text="是"
+              inactive-text="否"
+            />
+          </div>
+          <div class="field">
+            <label>缴纳社保</label>
+            <el-switch
+              v-model="form.is_pay_social_insurance"
+              :active-value="1"
+              :inactive-value="0"
+              active-text="是"
+              inactive-text="否"
+            />
+          </div>
+        </div>
+
+        <div class="section-title">仲裁请求(自动匹配的类型请逐条确认)</div>
+        <div v-for="(r, idx) in requestRows" :key="idx" class="request-card">
+          <div class="request-text">
+            <el-tag v-if="r.guessed" size="small" type="success" effect="plain">已自动匹配</el-tag>
+            <el-tag v-else size="small" type="warning" effect="plain">需人工选择</el-tag>
+            {{ r.text }}
+          </div>
+          <div class="request-fields">
+            <el-cascader
+              v-model="r.path"
+              :options="cascaderOptions"
+              placeholder="请求类型(三级)"
+              style="width: 340px"
+              @change="onPathChange(r)"
+            />
+            <el-select
+              v-model="r.option"
+              clearable
+              filterable
+              placeholder="第四级选项"
+              style="width: 260px"
+              :disabled="!optionsOf(r).length"
+            >
+              <el-option v-for="o in optionsOf(r)" :key="o" :label="o" :value="o" />
+            </el-select>
+            <el-input-number
+              v-model="r.object"
+              :min="0"
+              :precision="2"
+              :controls="false"
+              placeholder="金额(元)"
+              style="width: 140px"
+            />
+          </div>
+          <el-input
+            v-model="r.intro"
+            placeholder="请求表述:留空按内网模板自动生成,生成不了用上方原文"
+            class="intro-input"
+          />
+        </div>
+
+        <p class="hint">
+          区域固定为 福建省 / 三明市 / 永安市;证据材料暂不随提交上传,可在内网补充。
+          提交前可点"预览请求体"核对最终发往内网的数据。
+        </p>
+      </template>
+    </div>
+
+    <template #footer>
+      <el-button @click="emit('update:visible', false)">取消</el-button>
+      <el-button :disabled="!canSubmit" @click="openPreview">预览请求体</el-button>
+      <el-button type="primary" :loading="submitting" :disabled="!canSubmit" @click="doSubmit">
+        确认提交
+      </el-button>
+    </template>
+
+    <el-dialog v-model="previewVisible" title="发往内网的请求体" width="760px" append-to-body>
+      <pre class="preview-json">{{ previewJson }}</pre>
+    </el-dialog>
+  </el-dialog>
+</template>
+
+<style scoped>
+.submit-body {
+  min-height: 200px;
+}
+
+.mb {
+  margin-bottom: 10px;
+}
+
+.section-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 14px 0 10px;
+  padding-left: 8px;
+  border-left: 3px solid var(--accent-blue);
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px 14px;
+}
+
+.field label {
+  display: block;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 4px;
+}
+
+.request-card {
+  background: #f8fafc;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.request-text {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 8px;
+}
+
+.request-fields {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.intro-input {
+  font-size: 13px;
+}
+
+.hint {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  margin: 8px 0 0;
+}
+
+.preview-json {
+  max-height: 60vh;
+  overflow: auto;
+  font-size: 12px;
+  background: #f8fafc;
+  padding: 12px;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>

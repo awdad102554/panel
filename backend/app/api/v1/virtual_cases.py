@@ -24,6 +24,14 @@ from app.db.virtual import VirtualCase, VirtualSessionLocal
 from app.integrations.case_system.client import CaseSystemError
 from app.models.user import User
 from app.services.application_doc import generate_application
+from app.services.case_submit import (
+    SubmitSpec,
+    _fill_company_info,
+    build_draft,
+    build_payload,
+    get_request_catalog,
+    submit_case,
+)
 from app.services.datashare_lookup import lookup_company, lookup_person
 
 router = APIRouter(prefix="/virtual-cases", tags=["virtual-cases"])
@@ -313,6 +321,85 @@ async def download_application(
         background=BackgroundTask(lambda: tmp_path.unlink(missing_ok=True)),
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
     )
+
+
+def _row_to_case_dict(row: VirtualCase) -> dict:
+    """提交组装用的案件 dict(当事人保留原始 JSON,不做 PartyIn 过滤)。"""
+    return {
+        "case_reason": row.case_reason,
+        "claims": row.claims,
+        "applicants": row.applicants or [],
+        "respondents": row.respondents or [],
+    }
+
+
+@router.post("/{case_id}/submit-draft")
+async def submit_draft(
+    case_id: str,
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """提交草稿:自动猜仲裁请求类型 + 查企业回填 + 校验 + 字典,供提交对话框展示。"""
+    async with VirtualSessionLocal() as db:
+        row = await db.get(VirtualCase, case_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="预登记案件不存在")
+        case = _row_to_case_dict(row)
+    try:
+        return await build_draft(case)
+    except CaseSystemError as exc:
+        logger.warning("提交草稿字典拉取失败: %s", exc)
+        raise HTTPException(status_code=502, detail="内网字典服务不可用,请稍后重试") from exc
+
+
+@router.post("/{case_id}/submit-preview")
+async def submit_preview(
+    case_id: str,
+    spec: SubmitSpec,
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """预览组装好的内网请求体(不发内网),供与抓包样例比对/提交前确认。"""
+    async with VirtualSessionLocal() as db:
+        row = await db.get(VirtualCase, case_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="预登记案件不存在")
+        case = _row_to_case_dict(row)
+    catalog = await get_request_catalog()
+    applicants = [dict(p) for p in case["applicants"]]
+    respondents = [dict(p) for p in case["respondents"]]
+    # 与正式提交一致:预览也做企业信息回填。
+    await _fill_company_info(applicants, respondents)
+    case = {**case, "applicants": applicants, "respondents": respondents}
+    try:
+        return build_payload(case, spec, catalog)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{case_id}/submit")
+async def submit_to_internal(
+    case_id: str,
+    spec: SubmitSpec,
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """正式提交到内网收件(receive/add);成功后预登记置为 recorded。"""
+    async with VirtualSessionLocal() as db:
+        row = await db.get(VirtualCase, case_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="预登记案件不存在")
+        if row.status == "recorded":
+            raise HTTPException(status_code=409, detail="该案件已录入内网,请勿重复提交")
+        case = _row_to_case_dict(row)
+        try:
+            data = await submit_case(case, spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except CaseSystemError as exc:
+            logger.warning("提交内网收件失败[%s]: %s", row.receipt_number, exc)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        row.status = "recorded"
+        row.note = (row.note or "") + f" [已提交内网收件 {datetime.now():%Y-%m-%d %H:%M}]"
+        await db.commit()
+    return {"code": 200, "data": data}
 
 
 @router.get("/lookup/person")

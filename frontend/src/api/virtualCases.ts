@@ -92,3 +92,84 @@ export function lookupCompany(name: string) {
     })
     .then((res) => res.data);
 }
+
+// ---- 提交到内网 ----
+
+export interface CatalogNode {
+  id: number;
+  code: string;
+  name: string;
+}
+
+export interface CatalogItem {
+  path: CatalogNode[];
+  options: string[];
+  template: string;
+}
+
+export interface SubmitDraftRequest {
+  text: string;
+  path_ids: number[] | null;
+  path_names: string[] | null;
+  option: string | null;
+  object: number | null;
+  intro: string | null;
+  guessed: boolean;
+}
+
+export interface SubmitDraft {
+  defaults: {
+    apply_at: string;
+    town_id: number;
+    case_reason: string;
+    is_sign_labor_contract: number;
+    is_pay_social_insurance: number;
+    company_nature: string;
+    position: { Id: number; name: string }[];
+  };
+  requests: SubmitDraftRequest[];
+  respondents: Party[];
+  company_fills: { name: string; found: boolean; registered_capital?: string | number }[];
+  errors: string[];
+  warnings: string[];
+  meta: {
+    towns: { town_id: number; town_name: string }[];
+    case_reasons: string[];
+    company_natures: string[];
+    catalog: CatalogItem[];
+  };
+}
+
+export interface RequestSpec {
+  text: string;
+  path_ids: number[];
+  option: string | null;
+  object: number | null;
+  intro: string | null;
+}
+
+export interface SubmitSpec {
+  apply_at: string;
+  town_id: number;
+  case_reason: string;
+  is_sign_labor_contract: number;
+  is_pay_social_insurance: number;
+  company_nature: string;
+  requests: RequestSpec[];
+}
+
+export function fetchSubmitDraft(id: string) {
+  return apiClient.post<SubmitDraft>(`/virtual-cases/${id}/submit-draft`).then((res) => res.data);
+}
+
+export function submitPreview(id: string, spec: SubmitSpec) {
+  return apiClient
+    .post<Record<string, unknown>>(`/virtual-cases/${id}/submit-preview`, spec)
+    .then((res) => res.data);
+}
+
+export function submitToInternal(id: string, spec: SubmitSpec) {
+  return apiClient
+    .post<{ code: number; data: unknown }>(`/virtual-cases/${id}/submit`, spec)
+    .then((res) => res.data);
+}
