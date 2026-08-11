@@ -25,6 +25,7 @@ from app.integrations.case_system.client import CaseSystemError
 from app.models.user import User
 from app.services.application_doc import generate_application
 from app.services.case_submit import (
+    DuplicateCaseWarning,
     SubmitSpec,
     _fill_company_info,
     build_draft,
@@ -42,11 +43,34 @@ logger = logging.getLogger(__name__)
 _PARTY_TYPES = ("natural", "company")
 
 
+class AgentIn(BaseModel):
+    """代理人(内网代理人-添加弹窗字段,样例3):agent_type 类型码见
+    case_submit.AGENT_TYPES;律师类(6/7)带律所/律师类型/委托权限/法律援助,
+    法定/近亲属类带与当事人关系 relation(选"其他"时文本进 select_other_content)。"""
+
+    name: str
+    agent_type: int  # 1法定 2指定 3近亲属 4团体/单位推荐 5单位工作人员 6律师 7法律服务工作者
+    id_type: str | None = None
+    id_number: str | None = None
+    mobile: str | None = None
+    sex: str | None = None
+    relation: str | None = None  # 与当事人关系
+    select_other_content: str | None = None  # 关系为"其他"时的说明
+    agent_auth: str | None = None  # 委托权限: 一般授权/特别授权
+    law_firm_name: str | None = None  # 律师事务所名称
+    lawer_type: int | None = None  # 1执业律师 2实习律师(内网字段拼写如此)
+    is_legal_aid: int | None = None  # 法律援助 0/1
+    lawyer_card_number: str | None = None  # 律师执业证号
+    address: str | None = None  # 住址
+    receive_address: str | None = None  # 送达地址
+    job: str | None = None
+
+
 class PartyIn(BaseModel):
     """当事人。字段与 InfoWeb 新建案件表单对齐:
     自然人用 name/gender/ethnicity/birth_date/id_number/address/phone 等;
     公司用 name/id_number(统一社会信用代码)/address/phone/legal_person/legal_title。
-    申请人每人可带独立 claims(仲裁请求)/facts(事实理由)。"""
+    申请人每人可带独立 claims(仲裁请求)/facts(事实理由);均可带 agents(代理人)。"""
 
     party_type: str = "natural"  # natural=自然人 / company=公司
     name: str
@@ -65,6 +89,7 @@ class PartyIn(BaseModel):
     facts: str | None = None  # 事实与理由(申请人,每人一条)
     legal_person: str | None = None  # 法定代表人(公司)
     legal_title: str | None = None  # 职务(公司)
+    agents: list[AgentIn] = []  # 代理人(可多个)
 
 
 class EvidenceIn(BaseModel):
@@ -393,6 +418,9 @@ async def submit_to_internal(
             data = await submit_case(case, spec)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except DuplicateCaseWarning as exc:
+            # 内网提示疑似重复案件:返回 409,前端弹确认后带 force=true 重试。
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except CaseSystemError as exc:
             logger.warning("提交内网收件失败[%s]: %s", row.receipt_number, exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc

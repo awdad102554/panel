@@ -141,6 +141,22 @@ MAIN_CAUSE_PRESETS = [
     "申请人负工伤，被申请人拒绝支付工伤保险待遇",
 ]
 
+# 代理人类型(内网前端写死,receive-case chunk 的显示函数):
+# type 数组取最后一个元素为类型码(法定/指定为单元素,委托代理人子类为 [None, 码],样例3)。
+AGENT_TYPES = {
+    1: "法定代理人",
+    2: "指定代理人",
+    3: "近亲属",
+    4: "有关的社会团体或者当事人所在单位推荐的人",
+    5: "单位工作人员",
+    6: "律师",
+    7: "法律服务工作者",
+}
+# 与当事人关系(法定/近亲属等,截图捕获4);选"其他"时文本进 select_other_content。
+AGENT_RELATIONS = ["配偶", "父亲", "母亲", "儿子", "女儿", "其他"]
+AGENT_AUTHS = ["一般授权", "特别授权"]  # 委托权限
+LAWYER_TYPES = {1: "执业律师", 2: "实习律师"}  # lawer_type(内网拼写如此)
+
 
 # ---------------------------------------------------------------- 输入模型
 
@@ -156,14 +172,27 @@ class RequestSpec(BaseModel):
     """一条仲裁请求的提交参数(path_ids 为三级类型树节点 id)。
 
     单选项请求用 option+object;多选项请求($str 模板,如工伤保险待遇)用 items,
-    object 为空时自动按 items 求和。"""
+    object 为空时自动按 items 求和。模板含 开始日期/结束日期 占位的(工资/二倍工资等
+    期间类请求)用 start_at/end_at(样例3)。"""
 
     text: str  # 预登记原始自由文本(兜底 intro)
     path_ids: list[int]  # [一级id, 二级id, 三级id]
     option: str | None = None  # 第四级选项(无金额类请求可为空)
     object: float | None = None  # 标的金额(确认劳动关系等无金额请求为空)
     items: list[RequestItem] = []  # 多选项明细(优先级高于 option)
+    start_at: date | None = None  # 期间起(模板含"开始日期"时必填)
+    end_at: date | None = None  # 期间止(模板含"结束日期"时必填)
     intro: str | None = None  # 请求表述;为空时按模板自动生成,生成不了退回 text
+
+
+# 内网重复案件提示(前端拦截器放行这三类 message,弹确认后带 is_passed=1/
+# is_more_than_three=1(法院类再带 is_ct_cases_checked=1)用原 payload 重试,
+# 服务端据此放行——内网前端 receive-case-add chunk 的 add 流程,2026-08-11 实测)。
+_DUP_PATTERNS = ("已提交过相关案件", "申请人已进行多次仲裁申请", "已在法院提交过相关案件")
+
+
+class DuplicateCaseWarning(Exception):
+    """内网提示疑似重复案件,需用户确认后带 force 重试。"""
 
 
 class SubmitSpec(BaseModel):
@@ -182,6 +211,7 @@ class SubmitSpec(BaseModel):
     main_causes: list[str] = []
     fact_content: str | None = None  # 事实理由全文(用户编辑版;为空则自动生成/用预登记 facts)
     requests: list[RequestSpec]
+    force: bool = False  # 内网提示疑似重复案件后,用户确认仍要提交时置 True(重试一次)
 
 
 def compose_facts(
@@ -200,8 +230,9 @@ def compose_facts(
     parts: list[str] = []
     entry = _to_date_str(first.get("entry_date"))
     if entry:
-        y, m, d = entry.split("-")
-        seg = f"本人于{int(y)}年{int(m)}月{int(d)}日入职被申请人处"
+        dt = datetime.strptime(entry, "%Y-%m-%d")
+        # 内网前端用 moment YYYY年MM月DD日(月日零填充,样例2/3 验证)。
+        seg = f"本人于{dt:%Y年%m月%d日}入职被申请人处"
         tail: list[str] = []
         if first.get("work_place"):
             tail.append(f"实际工作地点{first['work_place']}")
@@ -308,11 +339,14 @@ def _fill_template(
     option: str | None,
     obj: float | None,
     items: list[RequestItem] | None = None,
+    start_at: date | None = None,
+    end_at: date | None = None,
 ) -> str | None:
     """按内网模板生成请求表述。含无法填充的占位时返回 None。
 
     $str 模板(样例2 工伤保险待遇):$str 替换为"（1）选项名金额元、（2）…"枚举,
-    需要 items 且每项有金额。
+    需要 items 且每项有金额。开始日期/结束日期 占位(样例3 工资争议)用 start_at/end_at,
+    格式为零填充"2026年07月29日"(与内网 moment YYYY年MM月DD日 一致)。
     """
     if not template:
         return None
@@ -331,6 +365,14 @@ def _fill_template(
         if not option:
             return None
         out = out.replace("选项1", option)
+    if "开始日期" in out:
+        if not start_at:
+            return None
+        out = out.replace("开始日期", f"{start_at:%Y年%m月%d日}")
+    if "结束日期" in out:
+        if not end_at:
+            return None
+        out = out.replace("结束日期", f"{end_at:%Y年%m月%d日}")
     if "标的" in out:
         if obj is None:
             return None
@@ -358,6 +400,40 @@ def _to_date_str(value: Any) -> str | None:
     except ValueError:
         return None
     return s
+
+
+# 代理人对象的可选字段(样例3;type/is_common/add_e_delivery/name 恒在)。
+_AGENT_OPTIONAL_KEYS = (
+    "id_type", "id_number", "mobile", "sex", "nation", "birth",
+    "agent_auth", "relation", "select_other_content",
+    "law_firm_name", "lawer_type", "is_legal_aid", "lawyer_card_number",
+    "address", "receive_address", "job",
+)
+
+
+def _agents_payload(agents: list | None) -> list[dict]:
+    """当事人 agents 数组(样例3):type 末元素为类型码;法定/指定代理人单元素 [码],
+    委托代理人子类 [None, 码]。缺 name/类型不合法的跳过(不让脏数据进内网)。"""
+    out: list[dict] = []
+    for a in agents or []:
+        if not isinstance(a, dict):
+            continue
+        code = a.get("agent_type")
+        if not a.get("name") or code not in AGENT_TYPES:
+            if a.get("name"):
+                logger.warning("代理人类型不合法,已跳过: %s (%s)", a.get("name"), code)
+            continue
+        item: dict = {
+            "name": a["name"],
+            "type": [code] if code in (1, 2) else [None, code],
+            "is_common": 0,
+            "add_e_delivery": 0,
+        }
+        for key in _AGENT_OPTIONAL_KEYS:
+            if a.get(key) not in (None, ""):
+                item[key] = a[key]
+        out.append(item)
+    return out
 
 
 def validate_case(case: dict) -> tuple[list[str], list[str]]:
@@ -404,62 +480,69 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
 
     personals: list[dict] = []
     for i, p in enumerate(applicants):
-        personals.append(
-            {
-                "name": p.get("name"),
-                "sex": p.get("gender") or "男",
-                "nation": p.get("ethnicity") or "汉族",
-                "birth": _to_date_str(p.get("birth_date")),
-                "is_migrant_worker": spec.is_migrant_worker,
-                "id_type": spec.id_type,
-                "id_number": p.get("id_number"),
-                "mobile": p.get("phone"),
-                "is_three_woman_worker": spec.is_three_woman_worker,
-                "registered_permanent_residence": p.get("address"),
-                "role": 1,
-                "related_user_type": 1,
-                "sort": i + 1,
-            }
-        )
+        entry: dict = {
+            "name": p.get("name"),
+            "sex": p.get("gender") or "男",
+            "nation": p.get("ethnicity") or "汉族",
+            "birth": _to_date_str(p.get("birth_date")),
+            "is_migrant_worker": spec.is_migrant_worker,
+            "id_type": spec.id_type,
+            "id_number": p.get("id_number"),
+            "mobile": p.get("phone"),
+            "is_three_woman_worker": spec.is_three_woman_worker,
+            "registered_permanent_residence": p.get("address"),
+            "role": 1,
+            "related_user_type": 1,
+            "sort": i + 1,
+        }
+        # 代理人(样例3):有代理人的当事人才带 agents 键(无代理人样例1/2 无此键)。
+        agents = _agents_payload(p.get("agents"))
+        if agents:
+            entry["agents"] = agents
+        personals.append(entry)
     # 自然人被申请人也进 personals(role=2)。
     for i, p in enumerate([r for r in respondents if r.get("party_type") != "company"]):
-        personals.append(
-            {
-                "name": p.get("name"),
-                "sex": p.get("gender") or "男",
-                "nation": p.get("ethnicity") or "汉族",
-                "birth": _to_date_str(p.get("birth_date")),
-                "is_migrant_worker": 0,
-                "id_type": DEFAULT_ID_TYPE,
-                "id_number": p.get("id_number"),
-                "mobile": p.get("phone"),
-                "is_three_woman_worker": 0,
-                "registered_permanent_residence": p.get("address"),
-                "role": 2,
-                "related_user_type": 2,
-                "sort": i + 1,
-            }
-        )
+        entry = {
+            "name": p.get("name"),
+            "sex": p.get("gender") or "男",
+            "nation": p.get("ethnicity") or "汉族",
+            "birth": _to_date_str(p.get("birth_date")),
+            "is_migrant_worker": 0,
+            "id_type": DEFAULT_ID_TYPE,
+            "id_number": p.get("id_number"),
+            "mobile": p.get("phone"),
+            "is_three_woman_worker": 0,
+            "registered_permanent_residence": p.get("address"),
+            "role": 2,
+            "related_user_type": 2,
+            "sort": i + 1,
+        }
+        agents = _agents_payload(p.get("agents"))
+        if agents:
+            entry["agents"] = agents
+        personals.append(entry)
 
     companys: list[dict] = []
     for i, p in enumerate([r for r in respondents if r.get("party_type") == "company"]):
-        companys.append(
-            {
-                "name": p.get("name"),
-                "registered_capital": _to_float(p.get("registered_capital")),
-                "company_nature": p.get("company_nature") or spec.company_nature,
-                "belong_to_industry": [],
-                "social_code": p.get("id_number"),
-                "legal_type": 1,
-                "legal_name": p.get("legal_person"),
-                "legal_job": p.get("legal_title"),
-                "mobile": p.get("phone"),
-                "company_address": p.get("address"),
-                "role": 2,
-                "related_user_type": 2,
-                "sort": i + 1,
-            }
-        )
+        entry = {
+            "name": p.get("name"),
+            "registered_capital": _to_float(p.get("registered_capital")),
+            "company_nature": p.get("company_nature") or spec.company_nature,
+            "belong_to_industry": [],
+            "social_code": p.get("id_number"),
+            "legal_type": 1,
+            "legal_name": p.get("legal_person"),
+            "legal_job": p.get("legal_title"),
+            "mobile": p.get("phone"),
+            "company_address": p.get("address"),
+            "role": 2,
+            "related_user_type": 2,
+            "sort": i + 1,
+        }
+        agents = _agents_payload(p.get("agents"))
+        if agents:
+            entry["agents"] = agents
+        companys.append(entry)
 
     by_leaf = {item["path"][-1]["id"]: item for item in catalog}
     arb_requests: list[dict] = []
@@ -490,20 +573,26 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
         )
         intro = (
             req.intro
-            or _fill_template(leaf["template"], req.option, obj, req.items or None)
+            or _fill_template(
+                leaf["template"], req.option, obj, req.items or None, req.start_at, req.end_at
+            )
             or req.text
         )
-        arb_requests.append(
-            {
-                "type": leaf["path"],
-                "is_main_dispute": 0,
-                "object": obj,
-                "intro": intro,
-                "opt": [names],
-                "level4_arr": level4_arr,
-                "other": {},
-            }
-        )
+        arb_req: dict = {
+            "type": leaf["path"],
+            "is_main_dispute": 0,
+            "object": obj,
+            "intro": intro,
+            "opt": [names],
+            "level4_arr": level4_arr,
+            "other": {},
+        }
+        # 期间类请求(样例3 工资争议):模板含开始/结束日期时带上起止。
+        if req.start_at:
+            arb_req["start_at"] = req.start_at.isoformat()
+        if req.end_at:
+            arb_req["end_at"] = req.end_at.isoformat()
+        arb_requests.append(arb_req)
 
     first = applicants[0] if applicants else {}
     facts = (spec.fact_content or "").strip()
@@ -695,12 +784,33 @@ async def build_draft(case: dict) -> dict:
             "worker_id_types": [d["name"] for d in worker_id_types],
             "catalog": catalog,
             "main_cause_presets": MAIN_CAUSE_PRESETS,
+            "agent_types": [{"code": c, "label": n} for c, n in AGENT_TYPES.items()],
+            "agent_relations": AGENT_RELATIONS,
+            "agent_auths": AGENT_AUTHS,
+            "lawyer_types": [{"code": c, "label": n} for c, n in LAWYER_TYPES.items()],
         },
     }
 
 
+async def _post_receive(payload: dict) -> dict:
+    """POST receive/add 一次,返回 body。http 非 200/非 JSON 抛 CaseSystemError。"""
+    client = get_case_system_client()
+    resp = await client.post(SUBMIT_PATH, json=payload)
+    if resp.status_code != 200:
+        raise CaseSystemError(f"receive/add http_{resp.status_code}")
+    try:
+        return resp.json()
+    except ValueError as exc:
+        raise CaseSystemError(f"receive/add 返回非 JSON: {resp.text[:200]}") from exc
+
+
 async def submit_case(case: dict, spec: SubmitSpec) -> dict:
-    """组装并 POST 到内网收件;返回内网响应 data。业务失败抛 CaseSystemError。"""
+    """组装并 POST 到内网收件;返回内网响应 data。
+
+    内网疑似重复案件(message 命中 _DUP_PATTERNS)抛 DuplicateCaseWarning;
+    spec.force=True 时按内网前端流程用原 payload 重试一次(服务端对已警告过的
+    重试放行)。业务失败抛 CaseSystemError。
+    """
     catalog = await get_request_catalog()
     applicants = [dict(p) for p in case.get("applicants") or []]
     respondents = [dict(p) for p in case.get("respondents") or []]
@@ -716,14 +826,21 @@ async def submit_case(case: dict, spec: SubmitSpec) -> dict:
     except Exception as exc:
         raise ValueError(f"请求体组装失败: {exc}") from exc
 
-    client = get_case_system_client()
-    resp = await client.post(SUBMIT_PATH, json=payload)
-    if resp.status_code != 200:
-        raise CaseSystemError(f"receive/add http_{resp.status_code}")
-    try:
-        body = resp.json()
-    except ValueError as exc:
-        raise CaseSystemError(f"receive/add 返回非 JSON: {resp.text[:200]}") from exc
-    if body.get("code") != 200:
-        raise CaseSystemError(f"内网收件失败: {body.get('message') or str(body)[:200]}")
-    return body.get("data") or {}
+    body = await _post_receive(payload)
+    if body.get("code") == 200:
+        return body.get("data") or {}
+    message = body.get("message") or str(body)[:200]
+    if any(p in message for p in _DUP_PATTERNS):
+        if not spec.force:
+            raise DuplicateCaseWarning(message)
+        # 内网前端确认后的重试带 is_passed/is_more_than_three 标志(法院类提示
+        # 再加 is_ct_cases_checked),服务端据此放行——receive-case-add chunk 实测代码。
+        logger.warning("内网提示疑似重复案件,用户已确认,带放行标志重试: %s", message)
+        retry_payload = {**payload, "is_passed": 1, "is_more_than_three": 1}
+        if "已在法院提交过相关案件" in message:
+            retry_payload["is_ct_cases_checked"] = 1
+        body = await _post_receive(retry_payload)
+        if body.get("code") == 200:
+            return body.get("data") or {}
+        message = body.get("message") or str(body)[:200]
+    raise CaseSystemError(f"内网收件失败: {message}")

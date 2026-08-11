@@ -251,7 +251,7 @@ def test_compose_facts_and_overrides():
     first = CASE["applicants"][0]
     text = compose_facts(first, 1, 1, ["被申请人违法解除与申请人劳动关系，请求支付赔偿金"])
     assert text == (
-        "本人于2011年1月1日入职被申请人处, 月工资标准为3656.25元。"
+        "本人于2011年01月01日入职被申请人处, 月工资标准为3656.25元。"
         "本人入职后，被申请人有与本人签订书面劳动合同,有为本人缴纳社会保险费;"
         "因被申请人违法解除与申请人劳动关系，请求支付赔偿金。"
         "为维护本人合法权益，特提出申请，望裁如所请。"
@@ -288,7 +288,7 @@ def test_compose_facts_and_overrides():
     # 不给 fact_content/facts:自动生成
     spec2 = spec.model_copy(update={"fact_content": None})
     fr2 = build_payload(case_no_facts, spec2, CATALOG)["fact_reason"]
-    assert fr2["content"].startswith("本人于2011年1月1日入职")
+    assert fr2["content"].startswith("本人于2011年01月01日入职")
     assert "因被申请人拖欠工资。" in fr2["content"]
 
 
@@ -307,6 +307,97 @@ def test_worker_flags():
     default = build_payload(CASE, SPEC, CATALOG)["personals"][0]
     assert default["is_migrant_worker"] == 0
     assert default["is_three_woman_worker"] == 0
+
+
+def test_agents_attached_per_party():
+    """样例3:代理人挂在当事人 agents 键;type 末元素为类型码。"""
+    case = {
+        **CASE,
+        "applicants": [
+            {
+                **CASE["applicants"][0],
+                "agents": [
+                    {
+                        "name": "陈钦",
+                        "agent_type": 6,
+                        "agent_auth": "特别授权",
+                        "id_type": "居民身份证（户口簿）",
+                        "id_number": "35012119880711672X",
+                        "mobile": "15280409500",
+                        "law_firm_name": "泰和泰（福州）律师事务所",
+                        "lawer_type": 1,
+                        "is_legal_aid": 0,
+                        "address": "福建省福州市台江区长汀街23号",
+                    },
+                    {"name": "类型不合法", "agent_type": 99},
+                ],
+            }
+        ],
+        "respondents": [
+            {
+                **CASE["respondents"][0],
+                "agents": [
+                    {
+                        "name": "张冰",
+                        "agent_type": 1,
+                        "relation": "其他",
+                        "select_other_content": "员工",
+                        "sex": "男",
+                    }
+                ],
+            }
+        ],
+    }
+    payload = build_payload(case, SPEC, CATALOG)
+    agents = payload["personals"][0]["agents"]
+    assert len(agents) == 1  # 类型不合法的跳过
+    a = agents[0]
+    assert a["type"] == [None, 6]
+    assert a["is_common"] == 0 and a["add_e_delivery"] == 0
+    assert a["law_firm_name"] == "泰和泰（福州）律师事务所"
+    assert a["agent_auth"] == "特别授权"
+    assert "relation" not in a  # 未填的可选键不出现
+    ca = payload["companys"][0]["agents"][0]
+    assert ca["type"] == [1]
+    assert ca["relation"] == "其他" and ca["select_other_content"] == "员工"
+    # 无代理人当事人不带 agents 键
+    assert "agents" not in build_payload(CASE, SPEC, CATALOG)["personals"][0]
+
+
+def test_date_range_request():
+    """样例3:模板含 开始日期/结束日期 的期间类请求(工资争议)。"""
+    leaf = {
+        "path": [
+            {"id": 1, "code": "1", "name": "劳动争议"},
+            {"id": 3, "code": "2", "name": "劳动报酬争议"},
+            {"id": 4, "code": "3", "name": "工资争议（基本工资、奖励性工资、津补贴）"},
+        ],
+        "options": [],
+        "template": "请求裁决被申请人向申请人支付开始日期至结束日期期间的工资标的元",
+    }
+    catalog = CATALOG + [leaf]
+    spec = SubmitSpec(
+        apply_at=date(2026, 8, 11),
+        case_reason="确认劳动关系",
+        requests=[
+            RequestSpec(
+                text="请求支付工资",
+                path_ids=[1, 3, 4],
+                object=0,
+                start_at=date(2026, 7, 29),
+                end_at=date(2026, 8, 20),
+            )
+        ],
+    )
+    req = build_payload(CASE, spec, catalog)["arb_requests"][0]
+    assert req["intro"] == "请求裁决被申请人向申请人支付2026年07月29日至2026年08月20日期间的工资0元。"
+    assert req["start_at"] == "2026-07-29" and req["end_at"] == "2026-08-20"
+    assert req["opt"] == [[]] and req["level4_arr"] == []
+    # 缺日期则模板不可填,退回自由文本
+    spec2 = spec.model_copy(deep=True)
+    spec2.requests[0].start_at = None
+    req2 = build_payload(CASE, spec2, catalog)["arb_requests"][0]
+    assert req2["intro"] == "请求支付工资"
 
 
 def test_validate_case():

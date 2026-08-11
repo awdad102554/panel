@@ -1,5 +1,26 @@
 import { apiClient } from "@/api/client";
 
+export interface Agent {
+  name: string;
+  /** 1法定 2指定 3近亲属 4团体/单位推荐 5单位工作人员 6律师 7法律服务工作者 */
+  agent_type: number;
+  id_type: string | null;
+  id_number: string | null;
+  mobile: string | null;
+  sex: string | null;
+  relation: string | null;
+  select_other_content: string | null;
+  agent_auth: string | null;
+  law_firm_name: string | null;
+  /** 1执业律师 2实习律师 */
+  lawer_type: number | null;
+  is_legal_aid: number | null;
+  lawyer_card_number: string | null;
+  address: string | null;
+  receive_address: string | null;
+  job: string | null;
+}
+
 export interface Party {
   party_type: "natural" | "company";
   name: string;
@@ -18,6 +39,7 @@ export interface Party {
   facts: string | null;
   legal_person: string | null;
   legal_title: string | null;
+  agents: Agent[];
 }
 
 export interface Evidence {
@@ -93,6 +115,33 @@ export function lookupCompany(name: string) {
     .then((res) => res.data);
 }
 
+/** 内网代理人登记记录(cases/Agent 原始字段)。 */
+export interface AgentRecord {
+  name: string;
+  id_type?: string;
+  id_number?: string;
+  mobile?: string;
+  sex?: string;
+  agent_auth?: string;
+  relation?: string;
+  select_other_content?: string;
+  law_firm_name?: string;
+  lawer_type?: number;
+  is_legal_aid?: number;
+  lawyer_card_number?: string;
+  address?: string;
+  registered_permanent_residence?: string;
+  receive_address?: string;
+  job?: string;
+  type?: (number | null)[];
+}
+
+export function lookupAgent(params: { name?: string; id_number?: string; mobile?: string }) {
+  return apiClient
+    .get<{ data?: AgentRecord[] }>("/virtual-cases/lookup/agent", { params })
+    .then((res) => res.data);
+}
+
 // ---- 提交到内网 ----
 
 export interface CatalogNode {
@@ -150,6 +199,10 @@ export interface SubmitDraft {
     worker_id_types: string[];
     catalog: CatalogItem[];
     main_cause_presets: string[];
+    agent_types: { code: number; label: string }[];
+    agent_relations: string[];
+    agent_auths: string[];
+    lawyer_types: { code: number; label: string }[];
   };
 }
 
@@ -164,6 +217,8 @@ export interface RequestSpec {
   option: string | null;
   object: number | null;
   items: RequestItem[];
+  start_at: string | null;
+  end_at: string | null;
   intro: string | null;
 }
 
@@ -181,6 +236,8 @@ export interface SubmitSpec {
   main_causes: string[];
   fact_content: string | null;
   requests: RequestSpec[];
+  /** 内网提示疑似重复案件后,用户确认仍要提交时置 true(后端用原 payload 重试一次) */
+  force: boolean;
 }
 
 export function fetchSubmitDraft(id: string) {

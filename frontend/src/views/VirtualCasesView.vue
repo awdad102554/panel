@@ -4,6 +4,7 @@ import { onMounted, ref } from "vue";
 
 import * as api from "@/api/virtualCases";
 import type { Evidence, Party, VirtualCase } from "@/api/virtualCases";
+import PartyAgentsEditor from "@/components/PartyAgentsEditor.vue";
 import VirtualCaseSubmitDialog from "@/components/VirtualCaseSubmitDialog.vue";
 
 const cases = ref<VirtualCase[]>([]);
@@ -45,6 +46,7 @@ function emptyApplicant(): Party {
     facts: null,
     legal_person: null,
     legal_title: null,
+    agents: [],
   };
 }
 
@@ -70,8 +72,17 @@ function fillRequests(p: Party): string[] {
 function openEdit(row: VirtualCase) {
   editingId.value = row.id;
   form.value = { note: row.note ?? "" };
-  applicants.value = row.applicants.map((p) => ({ ...emptyApplicant(), ...p, requests: fillRequests(p) }));
-  respondents.value = row.respondents.map((p) => ({ ...emptyRespondent(), ...p }));
+  applicants.value = row.applicants.map((p) => ({
+    ...emptyApplicant(),
+    ...p,
+    requests: fillRequests(p),
+    agents: (p.agents ?? []).map((a) => ({ ...a })),
+  }));
+  respondents.value = row.respondents.map((p) => ({
+    ...emptyRespondent(),
+    ...p,
+    agents: (p.agents ?? []).map((a) => ({ ...a })),
+  }));
   evidences.value = (row.evidences ?? []).map((e) => ({ ...e }));
   dialogVisible.value = true;
 }
@@ -145,6 +156,10 @@ async function save() {
   const all = [...applicants.value, ...respondents.value];
   if (all.some((p) => !p.name.trim())) {
     ElMessage.warning("当事人姓名/单位名称不能为空");
+    return;
+  }
+  if (all.some((p) => (p.agents ?? []).some((a) => !a.name.trim()))) {
+    ElMessage.warning("代理人姓名不能为空(或删除该代理人)");
     return;
   }
   saving.value = true;
@@ -447,6 +462,10 @@ onMounted(refresh);
                 <label>事实与理由</label>
                 <el-input v-model="p.facts" type="textarea" :rows="3" placeholder="请简明扼要叙述仲裁请求的事实依据和法律理由,包括入职时间、工作地点、工资情况、争议经过等。" />
               </div>
+              <div class="field span4">
+                <label>代理人(选填,提交内网时随当事人一并提交)</label>
+                <PartyAgentsEditor v-model="p.agents" />
+              </div>
             </div>
           </div>
           <el-button size="small" text type="primary" @click="addItem(applicants, emptyApplicant())">+ 添加申请人</el-button>
@@ -495,6 +514,10 @@ onMounted(refresh);
               <div class="field">
                 <label>联系电话</label>
                 <el-input v-model="p.phone" placeholder="请输入用人单位联系电话" />
+              </div>
+              <div class="field span4">
+                <label>代理人(选填,提交内网时随当事人一并提交)</label>
+                <PartyAgentsEditor v-model="p.agents" />
               </div>
             </div>
           </div>

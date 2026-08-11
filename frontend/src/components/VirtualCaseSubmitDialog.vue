@@ -41,6 +41,8 @@ interface RequestRow {
   option: string | null;
   object: number | null;
   items: { name: string; object: number | null }[]; // 多选项($str 模板)明细
+  start_at: string | null; // 期间起(模板含"开始日期"时显示)
+  end_at: string | null; // 期间止
   intro: string | null;
   guessed: boolean;
 }
@@ -79,6 +81,8 @@ watch(
         option: r.option,
         object: r.object,
         items: [],
+        start_at: null,
+        end_at: null,
         intro: r.intro,
         guessed: r.guessed,
       }));
@@ -130,6 +134,12 @@ function optionsOf(row: RequestRow): string[] {
 // $str 模板(如工伤保险待遇)需要多选项+逐项金额,金额合计自动求和。
 function isMulti(row: RequestRow): boolean {
   return (catalogItemOf(row.path)?.template ?? "").includes("$str");
+}
+
+// 期间类请求(工资/二倍工资等,样例3):模板含 开始日期/结束日期 占位。
+function needsDates(row: RequestRow): boolean {
+  const tpl = catalogItemOf(row.path)?.template ?? "";
+  return tpl.includes("开始日期") || tpl.includes("结束日期");
 }
 
 function onItemsChange(row: RequestRow, names: string[]) {
@@ -185,9 +195,12 @@ function buildSpec(): SubmitSpec {
         option: multi ? null : r.option || null,
         object: multi ? itemsSum(r) : r.object ?? null,
         items: multi ? r.items : [],
+        start_at: needsDates(r) ? r.start_at : null,
+        end_at: needsDates(r) ? r.end_at : null,
         intro: r.intro?.trim() || null,
       };
     }),
+    force: false,
   };
 }
 
@@ -245,15 +258,33 @@ async function doSubmit() {
   } catch {
     return;
   }
+  await submitWithSpec(buildSpec());
+}
+
+async function submitWithSpec(spec: SubmitSpec) {
   submitting.value = true;
   try {
-    await api.submitToInternal(props.caseId, buildSpec());
+    await api.submitToInternal(props.caseId, spec);
     ElMessage.success(`${props.receiptNumber} 已提交到内网收件`);
     emit("update:visible", false);
     emit("submitted");
   } catch (err: unknown) {
-    const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-    ElMessage.error(detail ?? "提交失败,请稍后重试");
+    const resp = (err as { response?: { status?: number; data?: { detail?: string } } })?.response;
+    // 内网提示疑似重复案件:让用户确认后带 force 重试(与内网前端流程一致)。
+    if (resp?.status === 409 && resp.data?.detail) {
+      try {
+        await ElMessageBox.confirm(resp.data.detail, "内网提示", {
+          type: "warning",
+          confirmButtonText: "仍要提交",
+          cancelButtonText: "取消",
+        });
+      } catch {
+        return;
+      }
+      await submitWithSpec({ ...spec, force: true });
+      return;
+    }
+    ElMessage.error(resp?.data?.detail ?? "提交失败,请稍后重试");
   } finally {
     submitting.value = false;
   }
@@ -425,6 +456,22 @@ const companyFillText = computed(() => {
               />
             </template>
           </div>
+          <div v-if="needsDates(r)" class="request-dates">
+            <el-date-picker
+              v-model="r.start_at"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="期间起(开始日期)"
+              style="width: 200px"
+            />
+            <el-date-picker
+              v-model="r.end_at"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="期间止(结束日期)"
+              style="width: 200px"
+            />
+          </div>
           <div v-if="isMulti(r) && r.items.length" class="items-amounts">
             <div v-for="(it, iIdx) in r.items" :key="it.name" class="item-amount">
               <span class="item-name">{{ iIdx + 1 }}. {{ it.name }}</span>
@@ -548,6 +595,12 @@ const companyFillText = computed(() => {
   font-size: 13px;
   color: var(--el-text-color-regular);
   align-self: center;
+}
+
+.request-dates {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 
 .items-amounts {
