@@ -163,7 +163,49 @@ class SubmitSpec(BaseModel):
     is_pay_social_insurance: int = 1
     is_easy: int = 1  # 是否简易案件(样例1小额=1/样例2工伤20万=0,规则不明,界面可改)
     company_nature: str = DEFAULT_COMPANY_NATURE
+    main_cause: str | None = None  # 主要原因(进 fact_reason.main_cause 与事实理由"因…"段)
+    fact_content: str | None = None  # 事实理由全文(用户编辑版;为空则自动生成/用预登记 facts)
     requests: list[RequestSpec]
+
+
+def compose_facts(
+    first: dict,
+    is_sign_labor_contract: int,
+    is_pay_social_insurance: int,
+    main_cause: str | None = None,
+) -> str:
+    """按内网"自动生成事实理由"的模板拼接(来自内网前端 getContent,样例2 验证)。
+
+    模板:本人于X年X月X日入职被申请人处, 实际工作地点…，工作岗位为…，月工资标准为…元。
+    本人入职后，被申请人{有/没有}与本人签订书面劳动合同,{有/没有}为本人缴纳社会保险费;
+    因{main_cause}。为维护本人合法权益，特提出申请，望裁如所请。
+    缺字段的片段自动省略,不出现"None/空"字样。
+    """
+    parts: list[str] = []
+    entry = _to_date_str(first.get("entry_date"))
+    if entry:
+        y, m, d = entry.split("-")
+        seg = f"本人于{int(y)}年{int(m)}月{int(d)}日入职被申请人处"
+        tail: list[str] = []
+        if first.get("work_place"):
+            tail.append(f"实际工作地点{first['work_place']}")
+        if first.get("position"):
+            tail.append(f"工作岗位为{first['position']}")
+        if _to_float(first.get("monthly_wage")) is not None:
+            tail.append(f"月工资标准为{_fmt_amount(_to_float(first['monthly_wage']))}元")
+        if tail:
+            seg += ", " + "，".join(tail)
+        parts.append(seg + "。")
+    sign = "有" if is_sign_labor_contract == 1 else "没有"
+    ins = "有" if is_pay_social_insurance == 1 else "没有"
+    parts.append(f"本人入职后，被申请人{sign}与本人签订书面劳动合同,{ins}为本人缴纳社会保险费")
+    cause = (main_cause or "").strip()
+    if cause:
+        parts[-1] += f";因{cause}。"
+    else:
+        parts[-1] += "。"
+    parts.append("为维护本人合法权益，特提出申请，望裁如所请。")
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------- 关键词猜测
@@ -437,9 +479,16 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
         )
 
     first = applicants[0] if applicants else {}
-    facts = "；".join(
-        f.strip() for f in (p.get("facts") for p in applicants) if f and f.strip()
-    )
+    facts = (spec.fact_content or "").strip()
+    if not facts:
+        facts = "；".join(
+            f.strip() for f in (p.get("facts") for p in applicants) if f and f.strip()
+        )
+    if not facts:
+        facts = compose_facts(
+            first, spec.is_sign_labor_contract, spec.is_pay_social_insurance, spec.main_cause
+        )
+    main_cause = [spec.main_cause.strip()] if spec.main_cause and spec.main_cause.strip() else [None, ""]
     return {
         "case_info": {
             "case_reason": spec.case_reason,
@@ -471,7 +520,7 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
             "salary": _to_float(first.get("monthly_wage")),
             "is_sign_labor_contract": spec.is_sign_labor_contract,
             "is_pay_social_insurance": spec.is_pay_social_insurance,
-            "main_cause": [None, ""],
+            "main_cause": main_cause,
             "content": facts,
             "otherIndex": 0,
             "otherChecked": True,
@@ -565,6 +614,13 @@ async def build_draft(case: dict) -> dict:
 
     merged = {**case, "applicants": applicants, "respondents": respondents}
     errors, warnings = validate_case(merged)
+
+    # 事实理由:预登记有 facts 用原文,否则按内网模板自动生成(对话框可改/重新生成)。
+    first = applicants[0] if applicants else {}
+    existing_facts = "；".join(
+        f.strip() for f in (p.get("facts") for p in applicants) if f and f.strip()
+    )
+    fact_content = existing_facts or compose_facts(first, 1, 1)
     for r in requests_draft:
         if not r["guessed"]:
             warnings.append(f"仲裁请求未能自动匹配类型,请人工选择: {r['text'][:30]}")
@@ -592,6 +648,13 @@ async def build_draft(case: dict) -> dict:
         "requests": requests_draft,
         "respondents": respondents,
         "company_fills": company_fills,
+        "fact_content": fact_content,
+        "fact_parts": {
+            "entry_date": first.get("entry_date"),
+            "work_place": first.get("work_place"),
+            "position": first.get("position"),
+            "monthly_wage": first.get("monthly_wage"),
+        },
         "errors": errors,
         "warnings": warnings,
         "meta": {

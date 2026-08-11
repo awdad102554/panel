@@ -131,6 +131,13 @@ export interface SubmitDraft {
   requests: SubmitDraftRequest[];
   respondents: Party[];
   company_fills: { name: string; found: boolean; registered_capital?: string | number }[];
+  fact_content: string;
+  fact_parts: {
+    entry_date: string | null;
+    work_place: string | null;
+    position: string | null;
+    monthly_wage: string | null;
+  };
   errors: string[];
   warnings: string[];
   meta: {
@@ -163,6 +170,8 @@ export interface SubmitSpec {
   is_pay_social_insurance: number;
   is_easy: number;
   company_nature: string;
+  main_cause: string | null;
+  fact_content: string | null;
   requests: RequestSpec[];
 }
 

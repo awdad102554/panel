@@ -28,6 +28,8 @@ const form = ref({
   is_pay_social_insurance: 1,
   is_easy: 1,
   company_nature: "私营企业",
+  main_cause: "",
+  fact_content: "",
 });
 interface RequestRow {
   text: string;
@@ -60,6 +62,8 @@ watch(
         is_pay_social_insurance: d.defaults.is_pay_social_insurance,
         is_easy: d.defaults.is_easy,
         company_nature: d.defaults.company_nature,
+        main_cause: "",
+        fact_content: d.fact_content,
       };
       requestRows.value = d.requests.map((r) => ({
         text: r.text,
@@ -157,6 +161,8 @@ function buildSpec(): SubmitSpec {
     is_pay_social_insurance: form.value.is_pay_social_insurance,
     is_easy: form.value.is_easy,
     company_nature: form.value.company_nature,
+    main_cause: form.value.main_cause.trim() || null,
+    fact_content: form.value.fact_content.trim() || null,
     requests: requestRows.value.map((r) => {
       const multi = isMulti(r);
       return {
@@ -169,6 +175,36 @@ function buildSpec(): SubmitSpec {
       };
     }),
   };
+}
+
+// 事实理由自动生成(与后端 compose_facts 同模板,内网"自动生成"按钮的复刻)。
+function composeFacts() {
+  const parts = draft.value?.fact_parts;
+  if (!parts) return;
+  const fmtAmount = (v: string | null) => {
+    const n = parseFloat(String(v ?? "").replace(",", ""));
+    return Number.isFinite(n) ? String(n) : null;
+  };
+  const segs: string[] = [];
+  if (parts.entry_date) {
+    const [y, m, d] = parts.entry_date.slice(0, 10).split("-").map(Number);
+    let seg = `本人于${y}年${m}月${d}日入职被申请人处`;
+    const tail: string[] = [];
+    if (parts.work_place) tail.push(`实际工作地点${parts.work_place}`);
+    if (parts.position) tail.push(`工作岗位为${parts.position}`);
+    const wage = fmtAmount(parts.monthly_wage);
+    if (wage) tail.push(`月工资标准为${wage}元`);
+    if (tail.length) seg += ", " + tail.join("，");
+    segs.push(seg + "。");
+  }
+  const sign = form.value.is_sign_labor_contract === 1 ? "有" : "没有";
+  const ins = form.value.is_pay_social_insurance === 1 ? "有" : "没有";
+  let seg2 = `本人入职后，被申请人${sign}与本人签订书面劳动合同,${ins}为本人缴纳社会保险费`;
+  const cause = form.value.main_cause.trim();
+  seg2 += cause ? `;因${cause}。` : "。";
+  segs.push(seg2);
+  segs.push("为维护本人合法权益，特提出申请，望裁如所请。");
+  form.value.fact_content = segs.join("");
 }
 
 async function openPreview() {
@@ -366,6 +402,18 @@ const companyFillText = computed(() => {
           />
         </div>
 
+        <div class="section-title">事实理由(与内网相同的自动生成,可编辑)</div>
+        <div class="fact-section">
+          <div class="fact-cause">
+            <label>主要原因(填入"因…"段,如:被申请人违法解除与申请人劳动关系，请求支付赔偿金)</label>
+            <el-input v-model="form.main_cause" placeholder="选填,留空则不含此段" />
+          </div>
+          <div class="fact-editor">
+            <el-input v-model="form.fact_content" type="textarea" :rows="4" />
+            <el-button size="small" class="compose-btn" @click="composeFacts">自动生成</el-button>
+          </div>
+        </div>
+
         <p class="hint">
           区域固定为 福建省 / 三明市 / 永安市;证据材料暂不随提交上传,可在内网补充。
           提交前可点"预览请求体"核对最终发往内网的数据。
@@ -463,6 +511,27 @@ const companyFillText = computed(() => {
   font-size: 13px;
   color: var(--el-text-color-regular);
   flex: 1;
+}
+
+.fact-cause {
+  margin-bottom: 8px;
+}
+
+.fact-cause label {
+  display: block;
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  margin-bottom: 4px;
+}
+
+.fact-editor {
+  position: relative;
+}
+
+.compose-btn {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
 }
 
 .hint {

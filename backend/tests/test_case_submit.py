@@ -244,6 +244,46 @@ def test_build_payload_multi_option_request():
         build_payload(CASE, bad_spec, catalog)
 
 
+def test_compose_facts_and_overrides():
+    """事实理由自动生成(内网模板) + main_cause/fact_content 覆盖。"""
+    from app.services.case_submit import compose_facts
+
+    first = CASE["applicants"][0]
+    text = compose_facts(first, 1, 1, "被申请人违法解除与申请人劳动关系，请求支付赔偿金")
+    assert text == (
+        "本人于2011年1月1日入职被申请人处, 月工资标准为3656.25元。"
+        "本人入职后，被申请人有与本人签订书面劳动合同,有为本人缴纳社会保险费;"
+        "因被申请人违法解除与申请人劳动关系，请求支付赔偿金。"
+        "为维护本人合法权益，特提出申请，望裁如所请。"
+    )
+    # 无主因:分号变句号
+    text2 = compose_facts(first, 0, 0)
+    assert "没有与本人签订书面劳动合同,没有为本人缴纳社会保险费。为维护" in text2
+    # 缺入职信息:省略首段
+    assert compose_facts({}, 1, 1).startswith("本人入职后")
+
+    # spec.fact_content 优先于 facts/自动生成
+    case_no_facts = {
+        **CASE,
+        "applicants": [{**CASE["applicants"][0], "facts": None}],
+    }
+    spec = SubmitSpec(
+        apply_at=date(2026, 5, 20),
+        case_reason="经济补偿争议",
+        main_cause="被申请人拖欠工资",
+        fact_content="手工编辑的事实理由。",
+        requests=[RequestSpec(text="x", path_ids=[1, 26, 28], option="解除劳动合同的经济补偿", object=1)],
+    )
+    fr = build_payload(case_no_facts, spec, CATALOG)["fact_reason"]
+    assert fr["content"] == "手工编辑的事实理由。"
+    assert fr["main_cause"] == ["被申请人拖欠工资"]
+    # 不给 fact_content/facts:自动生成
+    spec2 = spec.model_copy(update={"fact_content": None})
+    fr2 = build_payload(case_no_facts, spec2, CATALOG)["fact_reason"]
+    assert fr2["content"].startswith("本人于2011年1月1日入职")
+    assert "因被申请人拖欠工资。" in fr2["content"]
+
+
 def test_validate_case():
     errors, warnings = validate_case(CASE)
     assert errors == []
