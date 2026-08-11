@@ -1,6 +1,6 @@
 # 智能办案平台
 
-面向劳动人事争议仲裁的 AI 智能办案平台。需求文档见 `智能办案平台需求/`（01～10 号），架构说明见 `docs/architecture.md`，前端视觉规范见 `docs/design-guide.md`。
+面向劳动人事争议仲裁的 AI 智能办案平台。架构说明见 `docs/architecture.md`，前端视觉规范见 `docs/design-guide.md`。
 
 ## 技术栈
 
@@ -27,8 +27,7 @@
 │   └── tests/          pytest 测试
 ├── frontend/           Vue3 前端（views / components / api / stores / styles）
 ├── deploy/             systemd unit 与 HTTPS 部署说明
-├── docs/               架构说明、前端设计规范
-└── 智能办案平台需求/    需求与设计文档（01～10）
+└── docs/               架构说明、前端设计规范
 ```
 
 ## 快速开始
@@ -61,4 +60,3 @@ npm run dev
 - `docs/architecture.md` — 后端分层、关键设计（状态机、内网同步、紧急度、超审限判定等）、前端结构、运行方式
 - `docs/design-guide.md` — 前端统一视觉规范（深蓝科技风，改 UI 前必读）
 - `deploy/https.md` — 生产 HTTPS 部署步骤
-- `智能办案平台需求/` — 项目总体说明、PRD、AI 能力设计、页面原型等原始需求
