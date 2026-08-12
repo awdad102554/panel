@@ -125,6 +125,12 @@ function agentTypeOf(rec: AgentRecord): number {
 function pick(rec: AgentRecord) {
   const a = queryTarget.value;
   if (!a) return;
+  // 查询弹窗打开期间该代理人可能已被外层删除,避免静默回填到游离对象。
+  if (props.modelValue.indexOf(a) === -1) {
+    ElMessage.warning("该代理人已被删除,无法回填");
+    queryVisible.value = false;
+    return;
+  }
   a.name = rec.name || a.name;
   a.agent_type = agentTypeOf(rec);
   a.id_type = rec.id_type || a.id_type;

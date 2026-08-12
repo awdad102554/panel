@@ -209,22 +209,30 @@ function openOverLimit(kind: string, title: string) {
   );
 }
 
+// 卸载标志:加载期间离开页面时,rAF 回调不得再向 charts 追加实例。
+let unmounted = false;
+
 onMounted(async () => {
+  // 监听器同步注册(不能等 await 之后),否则加载期间离开页面会永久泄漏。
+  window.addEventListener("resize", resizeAll);
   try {
     const data = await statsApi.getStatsOverview();
     overview.value = data;
     // 图表依赖渲染后的 DOM 尺寸,等下一帧再初始化。
     requestAnimationFrame(() => {
+      if (unmounted) return;
       renderAll(data);
       if (compareRef.value) renderCompareChart(compareRef.value);
     });
+  } catch {
+    ElMessage.error("统计数据加载失败,请稍后重试");
   } finally {
     loading.value = false;
   }
-  window.addEventListener("resize", resizeAll);
 });
 
 onBeforeUnmount(() => {
+  unmounted = true;
   window.removeEventListener("resize", resizeAll);
   charts.forEach((c) => c.dispose());
 });

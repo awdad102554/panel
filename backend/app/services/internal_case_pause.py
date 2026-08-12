@@ -27,6 +27,7 @@ from app.integrations.case_system.client import (
     get_case_system_client,
 )
 from app.models.internal_case import InternalCaseTracking, InternalStage
+from app.services.internal_case_sync import SYNC_LOCK
 from app.services.internal_case_urgency import ARCHIVED_STEP, CLOSED_STEP
 
 logger = logging.getLogger(__name__)
@@ -167,7 +168,19 @@ async def backfill_paused_days(
     - 存量:已结案/已归档且 paused_days 为空的案件,每轮一批,只取一次。
     - 增量(存量清零后):在办案件的暂停仍在累计,每轮全量重算(量小,几十件),
        ongoing 的中止区间以今天为止。
+
+    全程持有 internal_case_sync.SYNC_LOCK,与同步/对账互斥:并发时 sync 会用
+    旧快照覆盖本循环刚算好的 paused_days(结案案件被算到"今天"而非结案日)。
     """
+    async with SYNC_LOCK:
+        return await _backfill_paused_days(db, client, batch)
+
+
+async def _backfill_paused_days(
+    db: AsyncSession,
+    client: CaseSystemClient | None = None,
+    batch: int = _BACKFILL_BATCH,
+) -> int:
     client = client or get_case_system_client()
     stmt = (
         select(InternalCaseTracking)

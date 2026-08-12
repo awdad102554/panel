@@ -1,13 +1,14 @@
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.core.permissions import Action, require_permission
 from app.db.session import get_db
+from app.models.document import Document
 from app.models.service_delivery import ServiceMethod, ServiceStatus
-from app.services import service_delivery_service
+from app.services import case_service, service_delivery_service
 from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter(prefix="/cases", tags=["service-delivery"])
@@ -47,6 +48,13 @@ async def create_service_delivery(
     db: AsyncSession = Depends(get_db),
     _current_user=Depends(require_permission(Action.EDIT)),
 ) -> ServiceDeliveryOut:
+    case = await case_service.get_case_workspace(db, case_id)
+    if case is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="案件不存在")
+    if payload.document_id is not None:
+        document = await db.get(Document, payload.document_id)
+        if document is None or document.case_id != case_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="文书不存在或不属于本案")
     delivery = await service_delivery_service.create_service_delivery(
         db, case_id=case_id, method=payload.method, document_id=payload.document_id
     )

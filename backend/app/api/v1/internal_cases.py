@@ -7,10 +7,12 @@
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
+from app.integrations.case_system.client import CaseSystemError
 from app.models.internal_case import (
     CaseTimeLimitOverride,
     InternalCaseTracking,
@@ -25,7 +27,7 @@ from app.schemas.internal_case import (
     OverrideRequest,
     SyncResultOut,
 )
-from app.services.internal_case_sync import sync_internal_cases, verify_consistency
+from app.services.internal_case_sync import SYNC_LOCK, sync_internal_cases, verify_consistency
 from app.services.time_limits import effective_settings
 from app.services.internal_case_urgency import (
     ARCHIVED_STEP,
@@ -129,6 +131,9 @@ async def trigger_sync(
     默认轻量(筛选接口 + 消失案件单点补拉,秒级);full=True 全量翻页兜底
     (约 4 分钟,用于纠正轻量同步可能漏掉的边缘情况)。
     """
+    if SYNC_LOCK.locked():
+        # 后台同步/中止回填进行中:不排队等待,直接提示稍后重试。
+        raise HTTPException(status_code=409, detail="另一同步任务进行中,请稍后重试")
     counts = await sync_internal_cases(db, full=full)
     await db.commit()
     return SyncResultOut(counts=counts)
@@ -144,14 +149,21 @@ async def verify_sync_consistency(
     只拉取不修正数据;每次结果(统计+差异明细)落库到 sync_verification_reports,
     供事后排查轻量同步问题。耗时与全量同步相当(约几分钟),按需手动触发。
     """
-    result = await verify_consistency(db)
+    if SYNC_LOCK.locked():
+        raise HTTPException(status_code=409, detail="另一同步任务进行中,请稍后重试")
+    try:
+        result = await verify_consistency(db)
+    except CaseSystemError as exc:
+        # 单环节失败已在 verify_consistency 内逐环节容错(记入 stage_errors),
+        # 走到这里说明是未预期的内网异常,按上游不可用处理。
+        raise HTTPException(status_code=502, detail="内网案件系统不可用,请稍后重试") from exc
     await db.commit()
     return result
 
 
 @router.get("/verify-reports")
 async def list_verify_reports(
-    limit: int = 20,
+    limit: int = Query(default=20, ge=0),
     db: AsyncSession = Depends(get_db),
     _current_user: User = Depends(get_current_user),
 ) -> list[dict]:
@@ -239,7 +251,12 @@ async def upsert_override(
     else:
         override.deadline_override = payload.deadline_override
         override.note = payload.note
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # 双击/并发:另一端已插入同案件的覆盖(external_case_id 唯一约束),
+        # 回滚后按已有记录返回(幂等,参考 virtual_cases 对 IntegrityError 的处理)。
+        await db.rollback()
 
     return await _reload_out(db, external_case_id)
 

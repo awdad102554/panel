@@ -10,6 +10,7 @@ import {
   Stamp,
   VideoPause,
 } from "@element-plus/icons-vue";
+import { ElMessage } from "element-plus";
 import { computed, onMounted, ref } from "vue";
 
 import * as dashboardApi from "@/api/dashboard";
@@ -77,6 +78,8 @@ async function openHearings() {
   hearingLoading.value = true;
   try {
     hearings.value = await dashboardApi.getUpcomingHearings();
+  } catch {
+    ElMessage.error("开庭安排加载失败,请稍后重试");
   } finally {
     hearingLoading.value = false;
   }
@@ -93,7 +96,11 @@ function hearingTime(openAt: string, endAt: string | null) {
 }
 
 onMounted(async () => {
-  summary.value = await dashboardApi.getDashboardSummary();
+  try {
+    summary.value = await dashboardApi.getDashboardSummary();
+  } catch {
+    ElMessage.error("总览数据加载失败,请稍后重试");
+  }
   // 读取时限设置,让明细弹窗的口径文案与实际阈值一致。
   try {
     const limits = await getTimeLimits();

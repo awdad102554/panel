@@ -91,15 +91,29 @@ def build_respondent_info(respondents: list[dict]) -> str:
     return "\n".join(blocks)
 
 
+def _party_requests(app: dict) -> list[tuple[str, dict | None]]:
+    """当事人请求行 [(文本, 结构化spec)]:requests 与 request_specs 按索引对齐;
+    旧数据没有 requests 时退回单一 claims 文本(与提交链 build_draft 的兜底一致)。"""
+    specs = app.get("request_specs") or []
+    rows: list[tuple[str, dict | None]] = []
+    for i, req in enumerate(app.get("requests") or []):
+        if not req or not req.strip():
+            continue
+        spec = specs[i] if i < len(specs) and isinstance(specs[i], dict) else None
+        rows.append((req.strip(), spec))
+    if not rows:
+        claims = (app.get("claims") or "").strip()
+        if claims:
+            rows.append((claims, None))
+    return rows
+
+
 def build_requests_text(applicants: list[dict]) -> str:
     """所有申请人的请求合并编号;已带数字序号的不重复添加。"""
     all_requests: list[str] = []
     request_index = 1
     for app in applicants:
-        for req in app.get("requests") or []:
-            req = (req or "").strip()
-            if not req:
-                continue
+        for req, _ in _party_requests(app):
             if re.match(r"^\d+[\.、]", req):
                 all_requests.append(req)
             else:
@@ -109,22 +123,34 @@ def build_requests_text(applicants: list[dict]) -> str:
 
 
 def build_total_amount(applicants: list[dict]) -> str:
-    """两个及以上请求时,从每个请求提取"元"前数值求和:以上共计XXX.XX元。"""
-    all_requests = [
-        req.strip()
-        for app in applicants
-        for req in (app.get("requests") or [])
-        if req and req.strip()
-    ]
-    if len(all_requests) <= 1:
+    """两个及以上请求时求和:以上共计XXX.XX元。
+
+    金额取值优先级(与提交链 build_payload 一致):object → items 齐全则求和 →
+    文本正则(旧数据兼容)。items 只有部分金额时不求部分和(申请书是正式文书,
+    部分和会偏低误导;提交链对缺金额是 422 拒绝)。"""
+    rows = [row for app in applicants for row in _party_requests(app)]
+    if len(rows) <= 1:
         return ""
     total = 0.0
     has_amount = False
-    for req in all_requests:
-        content = req.split("（")[0]
-        match = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*元", content)
-        if match:
-            total += float(match.group(1).replace(",", ""))
+    for text, spec in rows:
+        amount: float | None = None
+        if spec is not None:
+            if spec.get("object") is not None:
+                amount = float(spec["object"])
+            else:
+                items = [i for i in spec.get("items") or [] if isinstance(i, dict)]
+                if items and all(i.get("object") is not None for i in items):
+                    amount = sum(i["object"] for i in items)
+        if amount is None:
+            content = text.split("（")[0]
+            match = re.search(r"(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+(?:\.\d+)?)\s*(万)?元", content)
+            if match:
+                amount = float(match.group(1).replace(",", ""))
+                if match.group(2):
+                    amount *= 10000
+        if amount:
+            total += amount
             has_amount = True
     if has_amount and total > 0:
         return f"以上共计{total:.2f}元。"

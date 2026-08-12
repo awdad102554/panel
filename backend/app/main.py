@@ -10,7 +10,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.integrations.case_system.client import CaseSystemError
 from app.services.internal_case_pause import backfill_paused_days
-from app.services.internal_case_sync import sync_internal_cases
+from app.services.internal_case_sync import SYNC_LOCK, sync_internal_cases
 from app.services.time_limits import get_time_limits
 from app.db.virtual import init_virtual_db
 
@@ -33,16 +33,20 @@ async def _sync_loop() -> None:
     while True:
         interval = settings.case_sync_interval_minutes * 60
         if settings.case_system_enabled:
-            try:
-                async with SessionLocal() as db:
-                    interval = (await get_time_limits(db))["case_sync_interval_minutes"] * 60
-                    result = await sync_internal_cases(db, full=False)
-                    await db.commit()
-                logger.info("内网案件同步完成(轻量): %s", result)
-            except CaseSystemError as exc:
-                logger.warning("内网案件同步不可用,等待下一轮: %s", exc)
-            except Exception:
-                logger.exception("内网案件同步异常,等待下一轮")
+            if SYNC_LOCK.locked():
+                # 手动全量同步/对账/中止回填进行中:直接跳过本轮,不排队等待。
+                logger.info("另一同步任务进行中,本轮轻量同步跳过")
+            else:
+                try:
+                    async with SessionLocal() as db:
+                        interval = (await get_time_limits(db))["case_sync_interval_minutes"] * 60
+                        result = await sync_internal_cases(db, full=False)
+                        await db.commit()
+                    logger.info("内网案件同步完成(轻量): %s", result)
+                except CaseSystemError as exc:
+                    logger.warning("内网案件同步不可用,等待下一轮: %s", exc)
+                except Exception:
+                    logger.exception("内网案件同步异常,等待下一轮")
         await asyncio.sleep(interval)
 
 
@@ -55,17 +59,21 @@ async def _pause_backfill_loop() -> None:
     while True:
         wait_seconds = 3600
         if settings.case_system_enabled:
-            try:
-                async with SessionLocal() as db:
-                    done = await backfill_paused_days(db)
-                    await db.commit()
-                if done:
-                    logger.info("中止天数回填完成一批: %d 件", done)
-                    wait_seconds = 60  # 还有存量,1 分钟后继续下一批
-            except CaseSystemError as exc:
-                logger.warning("中止天数回填不可用,等待下一轮: %s", exc)
-            except Exception:
-                logger.exception("中止天数回填异常,等待下一轮")
+            if SYNC_LOCK.locked():
+                # 同步/对账进行中:跳过本轮回填,避免 paused_days 互相覆盖。
+                logger.info("另一同步任务进行中,本轮中止天数回填跳过")
+            else:
+                try:
+                    async with SessionLocal() as db:
+                        done = await backfill_paused_days(db)
+                        await db.commit()
+                    if done:
+                        logger.info("中止天数回填完成一批: %d 件", done)
+                        wait_seconds = 60  # 还有存量,1 分钟后继续下一批
+                except CaseSystemError as exc:
+                    logger.warning("中止天数回填不可用,等待下一轮: %s", exc)
+                except Exception:
+                    logger.exception("中止天数回填异常,等待下一轮")
         await asyncio.sleep(wait_seconds)
 
 

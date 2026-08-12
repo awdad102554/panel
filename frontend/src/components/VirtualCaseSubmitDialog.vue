@@ -4,6 +4,13 @@ import { computed, ref, watch } from "vue";
 
 import * as api from "@/api/virtualCases";
 import type { CatalogItem, SubmitDraft, SubmitSpec } from "@/api/virtualCases";
+import {
+  buildCascaderOptions,
+  catalogItemOf as catalogItemOfCatalog,
+  isMultiTemplate,
+  needsDatesTemplate,
+  needsOtherTemplate,
+} from "@/utils/requestCatalog";
 
 const props = defineProps<{
   visible: boolean;
@@ -43,7 +50,11 @@ interface RequestRow {
   items: { name: string; object: number | null }[]; // 多选项($str 模板)明细
   start_at: string | null; // 期间起(模板含"开始日期"时显示)
   end_at: string | null; // 期间止
+  other: string; // $other 模板(其他类请求)的具体内容
   intro: string | null;
+  // intro 为草稿自动预填(用户在预登记改过的文本):改类型/金额/期间时若未手动
+  // 编辑过 intro,要清掉让模板按新值重生成,否则旧表述随新数据进内网。
+  introAuto: boolean;
   guessed: boolean;
 }
 const requestRows = ref<RequestRow[]>([]);
@@ -51,14 +62,23 @@ const requestRows = ref<RequestRow[]>([]);
 const previewVisible = ref(false);
 const previewJson = ref("");
 
+// 草稿加载竞态守卫:打开 A 案后立即取消再打开 B 案时,A 的慢响应不得覆盖 B 的表单,
+// A 的失败回调也不得误关 B 的对话框。
+let loadSeq = 0;
+
 watch(
-  () => props.visible,
-  async (v) => {
+  // immediate: 父组件 v-if=submitTarget 首次挂载时 visible 已为 true,
+  // 没有 immediate 首次打开永远不触发加载,对话框一片空白(关掉重开才好)。
+  [() => props.visible, () => props.caseId],
+  async ([v]) => {
     if (!v) return;
+    const seq = ++loadSeq;
+    const caseId = props.caseId;
     loading.value = true;
     draft.value = null;
     try {
-      const d = await api.fetchSubmitDraft(props.caseId);
+      const d = await api.fetchSubmitDraft(caseId);
+      if (seq !== loadSeq || !props.visible || props.caseId !== caseId) return;
       draft.value = d;
       form.value = {
         apply_at: d.defaults.apply_at,
@@ -80,51 +100,32 @@ watch(
         path: r.path_ids ? [...r.path_ids] : [],
         option: r.option,
         object: r.object,
-        items: [],
-        start_at: null,
-        end_at: null,
+        // 结构化录入的请求带明细/期间,直接预填(此前丢成空,多选项请求还得重选一遍)。
+        items: (r.items ?? []).map((i) => ({ name: i.name, object: i.object })),
+        start_at: r.start_at ?? null,
+        end_at: r.end_at ?? null,
+        other: r.other ?? "",
         intro: r.intro,
+        introAuto: !!r.intro,
         guessed: r.guessed,
       }));
     } catch (err: unknown) {
+      if (seq !== loadSeq || !props.visible || props.caseId !== caseId) return;
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       ElMessage.error(detail ?? "草稿加载失败,请稍后重试");
       emit("update:visible", false);
     } finally {
-      loading.value = false;
+      if (seq === loadSeq) loading.value = false;
     }
   },
+  { immediate: true },
 );
 
-// 仲裁请求类型树 → el-cascader 选项(三级)
-interface CascaderNode {
-  value: number;
-  label: string;
-  children?: CascaderNode[];
-}
-const cascaderOptions = computed<CascaderNode[]>(() => {
-  const catalog = draft.value?.meta.catalog ?? [];
-  const l1map = new Map<number, CascaderNode>();
-  const l2map = new Map<string, CascaderNode>();
-  for (const item of catalog) {
-    const [l1, l2, l3] = item.path;
-    if (!l1map.has(l1.id)) l1map.set(l1.id, { value: l1.id, label: l1.name, children: [] });
-    const n1 = l1map.get(l1.id)!;
-    const key2 = `${l1.id}/${l2.id}`;
-    if (!l2map.has(key2)) {
-      const n2: CascaderNode = { value: l2.id, label: l2.name, children: [] };
-      l2map.set(key2, n2);
-      n1.children!.push(n2);
-    }
-    l2map.get(key2)!.children!.push({ value: l3.id, label: l3.name });
-  }
-  return [...l1map.values()];
-});
+// 仲裁请求类型树 → el-cascader 选项(支持两级叶子,确认劳动关系等没有第三层)
+const cascaderOptions = computed(() => buildCascaderOptions(draft.value?.meta.catalog ?? []));
 
 function catalogItemOf(path: number[]): CatalogItem | undefined {
-  return draft.value?.meta.catalog.find(
-    (c) => c.path.length === 3 && c.path.every((n, i) => n.id === path[i]),
-  );
+  return catalogItemOfCatalog(draft.value?.meta.catalog ?? [], path);
 }
 
 function optionsOf(row: RequestRow): string[] {
@@ -133,18 +134,23 @@ function optionsOf(row: RequestRow): string[] {
 
 // $str 模板(如工伤保险待遇)需要多选项+逐项金额,金额合计自动求和。
 function isMulti(row: RequestRow): boolean {
-  return (catalogItemOf(row.path)?.template ?? "").includes("$str");
+  return isMultiTemplate(catalogItemOf(row.path)?.template ?? "");
 }
 
 // 期间类请求(工资/二倍工资等,样例3):模板含 开始日期/结束日期 占位。
 function needsDates(row: RequestRow): boolean {
-  const tpl = catalogItemOf(row.path)?.template ?? "";
-  return tpl.includes("开始日期") || tpl.includes("结束日期");
+  return needsDatesTemplate(catalogItemOf(row.path)?.template ?? "");
+}
+
+// 其他类请求:模板含 $other 占位,需要填具体内容。
+function needsOther(row: RequestRow): boolean {
+  return needsOtherTemplate(catalogItemOf(row.path)?.template ?? "");
 }
 
 function onItemsChange(row: RequestRow, names: string[]) {
   const old = new Map(row.items.map((i) => [i.name, i.object]));
   row.items = names.map((n) => ({ name: n, object: old.get(n) ?? null }));
+  onFieldChange(row);
 }
 
 function itemsSum(row: RequestRow): number | null {
@@ -152,9 +158,9 @@ function itemsSum(row: RequestRow): number | null {
   return row.items.reduce((acc, i) => acc + (i.object ?? 0), 0);
 }
 
-function onPathChange(row: RequestRow) {
-  // 换了类型后,原第四级选项/金额/期间大概率不再适用,清空重选
-  // (陈旧金额随新类型提交会产生错误数据)。
+function onPathChange(row: RequestRow, idx: number) {
+  // 换了类型后,原第四级选项/金额/期间/请求表述大概率不再适用,清空重选
+  // (陈旧金额或旧类型的 intro 随新类型提交会产生错误数据)。
   const item = catalogItemOf(row.path);
   if (row.option && !(item?.options ?? []).includes(row.option)) {
     row.option = null;
@@ -163,6 +169,23 @@ function onPathChange(row: RequestRow) {
   row.object = null;
   row.start_at = null;
   row.end_at = null;
+  row.other = "";
+  row.intro = null;
+  row.introAuto = false;
+  // 与内网一致的规律:案由跟随第一条请求的第二层类型自动选择(仍可手动改)。
+  const l2name = item?.path[1]?.name;
+  if (idx === 0 && l2name && (draft.value?.meta.case_reasons ?? []).includes(l2name)) {
+    form.value.case_reason = l2name;
+  }
+}
+
+/** 选项/金额/期间变化:intro 若是草稿自动预填的(未手动编辑)则清掉,
+ * 让后端按新值套模板重生成,避免旧金额表述随新数据进内网。 */
+function onFieldChange(row: RequestRow) {
+  if (row.introAuto) {
+    row.intro = null;
+    row.introAuto = false;
+  }
 }
 
 const canSubmit = computed(
@@ -174,7 +197,13 @@ const canSubmit = computed(
     requestRows.value.length > 0 &&
     requestRows.value.every(
       (r) =>
-        r.path.length === 3 &&
+        // 路径要能在目录里匹配到完整叶子(三级;确认劳动关系等两级叶子为两级)
+        !!catalogItemOf(r.path) &&
+        // 其他类($other 模板)请求必须填具体内容,否则字面 $other 进内网
+        (!needsOther(r) || !!r.other.trim()) &&
+        // 期间类请求(工资/二倍工资等)必须有起止日期,否则模板填不出、
+        // 请求在无期间字段的情况下进内网(后端 RequestSpec 约定必填但未强制)。
+        (!needsDates(r) || (r.start_at && r.end_at)) &&
         // 多选项($str)请求必须每项都有金额,否则总额/明细不一致进内网。
         (!isMulti(r) || (r.items.length > 0 && r.items.every((i) => i.object != null))),
     ),
@@ -207,6 +236,7 @@ function buildSpec(): SubmitSpec {
         items: multi ? r.items : [],
         start_at: needsDates(r) ? r.start_at : null,
         end_at: needsDates(r) ? r.end_at : null,
+        other: r.other.trim() || null,
         intro: r.intro?.trim() || null,
       };
     }),
@@ -224,7 +254,8 @@ function composeFacts() {
   };
   const segs: string[] = [];
   if (parts.entry_date) {
-    const [y, m, d] = parts.entry_date.slice(0, 10).split("-").map(Number);
+    // 月日零填充(与后端 compose_facts/内网 moment YYYY年MM月DD日 一致)。
+    const [y, m, d] = parts.entry_date.slice(0, 10).split("-");
     let seg = `本人于${y}年${m}月${d}日入职被申请人处`;
     const tail: string[] = [];
     if (parts.work_place) tail.push(`实际工作地点${parts.work_place}`);
@@ -259,23 +290,36 @@ async function openPreview() {
 }
 
 async function doSubmit() {
+  // 确认框弹出期间禁止重复触发,避免双击开出两个确认框都提交。
+  if (submitting.value) return;
+  submitting.value = true;
   try {
-    await ElMessageBox.confirm(
-      `确认将 ${props.receiptNumber} 提交到内网收件?提交后内网将生成正式收件记录。`,
-      "提交确认",
-      { type: "warning", confirmButtonText: "确认提交", cancelButtonText: "再检查一下" },
-    );
-  } catch {
-    return;
+    try {
+      await ElMessageBox.confirm(
+        `确认将 ${props.receiptNumber} 提交到内网收件?提交后内网将生成正式收件记录。`,
+        "提交确认",
+        { type: "warning", confirmButtonText: "确认提交", cancelButtonText: "再检查一下" },
+      );
+    } catch {
+      return;
+    }
+    await submitWithSpec(buildSpec());
+  } finally {
+    submitting.value = false;
   }
-  await submitWithSpec(buildSpec());
 }
 
 async function submitWithSpec(spec: SubmitSpec) {
   submitting.value = true;
   try {
-    await api.submitToInternal(props.caseId, spec);
-    ElMessage.success(`${props.receiptNumber} 已提交到内网收件`);
+    const res = await api.submitToInternal(props.caseId, spec);
+    // 内网已建案但本地状态落库失败时后端带 warning:必须提示人工核对,
+    // 只弹成功会让用户看到"待录入"再次提交,造成内网重复建案。
+    if (res.warning) {
+      ElMessage.warning(res.warning);
+    } else {
+      ElMessage.success(`${props.receiptNumber} 已提交到内网收件`);
+    }
     emit("update:visible", false);
     emit("submitted");
   } catch (err: unknown) {
@@ -428,9 +472,9 @@ const companyFillText = computed(() => {
             <el-cascader
               v-model="r.path"
               :options="cascaderOptions"
-              placeholder="请求类型(三级)"
+              placeholder="请求类型(确认劳动关系等为两级)"
               style="width: 340px"
-              @change="onPathChange(r)"
+              @change="onPathChange(r, idx)"
             />
             <template v-if="isMulti(r)">
               <el-select
@@ -453,6 +497,7 @@ const companyFillText = computed(() => {
                 placeholder="第四级选项"
                 style="width: 260px"
                 :disabled="!optionsOf(r).length"
+                @change="onFieldChange(r)"
               >
                 <el-option v-for="o in optionsOf(r)" :key="o" :label="o" :value="o" />
               </el-select>
@@ -463,6 +508,7 @@ const companyFillText = computed(() => {
                 :controls="false"
                 placeholder="金额(元)"
                 style="width: 140px"
+                @change="onFieldChange(r)"
               />
             </template>
           </div>
@@ -473,6 +519,7 @@ const companyFillText = computed(() => {
               value-format="YYYY-MM-DD"
               placeholder="期间起(开始日期)"
               style="width: 200px"
+              @change="onFieldChange(r)"
             />
             <el-date-picker
               v-model="r.end_at"
@@ -480,6 +527,15 @@ const companyFillText = computed(() => {
               value-format="YYYY-MM-DD"
               placeholder="期间止(结束日期)"
               style="width: 200px"
+              @change="onFieldChange(r)"
+            />
+          </div>
+          <div v-if="needsOther(r)" class="request-dates">
+            <el-input
+              v-model="r.other"
+              placeholder="其他类请求的具体内容,如:未缴纳住房公积金损失"
+              style="width: 400px"
+              @input="onFieldChange(r)"
             />
           </div>
           <div v-if="isMulti(r) && r.items.length" class="items-amounts">
@@ -492,6 +548,7 @@ const companyFillText = computed(() => {
                 :controls="false"
                 placeholder="金额(元)"
                 style="width: 140px"
+                @change="onFieldChange(r)"
               />
             </div>
           </div>
@@ -499,6 +556,7 @@ const companyFillText = computed(() => {
             v-model="r.intro"
             placeholder="请求表述:留空按内网模板自动生成,生成不了用上方原文"
             class="intro-input"
+            @input="r.introAuto = false"
           />
         </div>
 
@@ -537,7 +595,7 @@ const companyFillText = computed(() => {
     <template #footer>
       <el-button @click="emit('update:visible', false)">取消</el-button>
       <el-button :disabled="!canSubmit" @click="openPreview">预览请求体</el-button>
-      <el-button type="primary" :loading="submitting" :disabled="!canSubmit" @click="doSubmit">
+      <el-button type="primary" :loading="submitting" :disabled="!canSubmit || submitting" @click="doSubmit">
         确认提交
       </el-button>
     </template>

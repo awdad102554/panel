@@ -13,7 +13,11 @@ import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
-from app.integrations.case_system.client import CaseSystemClient, get_case_system_client
+from app.integrations.case_system.client import (
+    CaseSystemClient,
+    CaseSystemError,
+    get_case_system_client,
+)
 
 _HOLD_COURT_PATH = "/v1/api/admin/getAllHoldCourt"
 
@@ -105,8 +109,21 @@ async def fetch_hearings(
     seen: set[int] = set()
     for year_month in _months_between(start, end):
         resp = await client.get(_HOLD_COURT_PATH, params={"calendar_date": year_month})
-        body = resp.json() if resp.status_code == 200 else {}
+        if resp.status_code != 200:
+            body = {}
+        else:
+            # 上游异常时可能 200 返回 HTML/非 dict/记录非 dict,统一转成
+            # CaseSystemError(调用方 dashboard 只捕获它,按 0 场处理),
+            # 与 datashare_lookup._post_json 的防御风格一致。
+            try:
+                body = resp.json()
+            except ValueError as exc:
+                raise CaseSystemError(f"hold_court_bad_json: {exc}") from exc
+            if not isinstance(body, dict):
+                raise CaseSystemError("hold_court_bad_body")
         for raw in body.get("data") or []:
+            if not isinstance(raw, dict):
+                raise CaseSystemError("hold_court_bad_record")
             # 同一排期可能在相邻月份的返回里重复出现,按内网主键去重。
             row_id = raw.get("id")
             if row_id in seen:

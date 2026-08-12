@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -43,6 +44,14 @@ from app.services.internal_case_urgency import ARCHIVED_STEP, CLOSED_STEP
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 100
+# 翻页保险丝:上游忽略 page 参数或 totalNum 异常时,翻页循环可能永不终止,
+# 超过该页数直接判失败(抛 CaseSystemError,该环节跳过)。
+_PAGE_LIMIT = 500
+
+# 同步/对账/中止天数回填互斥锁(模块级一把,单 worker):并发会让结案案件的
+# paused_days 被旧值覆盖固化、已删快照被并发同步复活并丢失人工时效覆盖
+# (2026-08-12 审查发现)。后台循环用 locked() 检查跳过本轮,手动端点返回 409。
+SYNC_LOCK = asyncio.Lock()
 
 # 内网系统时间戳是无时区的本地时间(CST, UTC+8),解析后需显式带上时区,
 # 否则存入 DateTime(timezone=True) 列时会被当成 UTC,导致天数计算偏差 8 小时。
@@ -125,7 +134,12 @@ async def _fetch_stage_records(
         resp = await client.get(path, params=params)
         if resp.status_code != 200:
             raise CaseSystemError(f"{path}_http_{resp.status_code}")
-        body = resp.json()
+        try:
+            body = resp.json()
+        except ValueError as exc:
+            # 上游 200 返回 HTML 等非 JSON 时 resp.json() 抛 ValueError,统一成
+            # CaseSystemError,避免穿透成 500/误判"远端为空"。
+            raise CaseSystemError(f"{path}_bad_json") from exc
         data = body.get("data") if isinstance(body, dict) else None
         if not isinstance(data, dict):
             raise CaseSystemError(f"{path}_bad_body")
@@ -135,6 +149,8 @@ async def _fetch_stage_records(
         if not batch or (isinstance(total, int) and page * _PAGE_SIZE >= total):
             break
         page += 1
+        if page > _PAGE_LIMIT:
+            raise CaseSystemError(f"{path}_page_overflow")
     return records
 
 
@@ -145,7 +161,10 @@ async def _fetch_first_page(
     resp = await client.get(path, params={"page": 1, "page_size": _PAGE_SIZE, **extra})
     if resp.status_code != 200:
         raise CaseSystemError(f"{path}_http_{resp.status_code}")
-    body = resp.json()
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise CaseSystemError(f"{path}_bad_json") from exc
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, dict):
         raise CaseSystemError(f"{path}_bad_body")
@@ -175,7 +194,10 @@ async def _fetch_single_by_case_no(
     )
     if resp.status_code != 200:
         raise CaseSystemError(f"{stage.value}_single_http_{resp.status_code}")
-    body = resp.json()
+    try:
+        body = resp.json()
+    except ValueError as exc:
+        raise CaseSystemError(f"{stage.value}_single_bad_json") from exc
     data = body.get("data") if isinstance(body, dict) else None
     batch = (data.get("data") or data.get("list") or []) if isinstance(data, dict) else []
     if expected_case_id is None:
@@ -310,7 +332,18 @@ async def sync_internal_cases(
 
     full=True  全量翻页(仅手工恢复用,日常不跑);full=False 轻量(筛选接口
     + 日期补抓 + 消失案件单点补拉)。
+
+    全程持有模块级 SYNC_LOCK,与对账/中止天数回填互斥:并发会让结案案件的
+    paused_days 被旧值覆盖固化、已删快照被并发同步复活并丢失人工时效覆盖
+    (2026-08-12 审查发现)。
     """
+    async with SYNC_LOCK:
+        return await _sync_internal_cases(db, client, full=full)
+
+
+async def _sync_internal_cases(
+    db: AsyncSession, client: CaseSystemClient | None = None, *, full: bool = True
+) -> dict[str, int]:
     client = client or get_case_system_client()
 
     # 预加载同步前的现有快照,用于判断 (stage, current_step) 是否变化以维护 phase_entered_at,
@@ -583,15 +616,24 @@ async def verify_consistency(
 
     用于验证轻量同步是否有遗漏(2026-07-31 起全量退出日常机制后的校验手段)。
     每次校验的统计与完整差异明细落库到 sync_verification_reports(由调用方提交),
-    供事后排查轻量同步的问题。
+    供事后排查轻量同步的问题。全程持有 SYNC_LOCK,与同步/中止回填互斥。
 
     返回:
     - checked: 内网全量案件数
     - missing_in_snapshot: 内网有但快照缺失(轻量同步漏同步)
     - field_mismatches: 两边都有但 阶段/子状态/结案字段 不一致(轻量同步没跟上)
     - only_in_snapshot: 快照有但内网全量未返回的条数(预约历史等,通常无害,仅计数)
+    - stage_errors: 抓取失败被跳过的环节及原因(失败的环节不参与比对,绝不把
+      "没拉到"当成"远端为空"误报本地缺失)
     返回的差异列表各最多 50 条;落库明细各最多 500 条。
     """
+    async with SYNC_LOCK:
+        return await _verify_consistency(db, client)
+
+
+async def _verify_consistency(
+    db: AsyncSession, client: CaseSystemClient | None = None
+) -> dict:
     client = client or get_case_system_client()
     existing: dict[str, InternalCaseTracking] = {}
     result = await db.execute(select(InternalCaseTracking))
@@ -599,8 +641,16 @@ async def verify_consistency(
         existing[row.external_case_id] = row
 
     merged: dict[str, dict] = {}
+    stage_errors: list[str] = []
     for stage, path, extra in _STAGE_SPECS:
-        records = await _fetch_stage_records(client, path, extra)
+        try:
+            records = await _fetch_stage_records(client, path, extra)
+        except CaseSystemError as exc:
+            # 抓取失败绝不能当成"远端为空"——会把该环节全部案件误报为本地缺失,
+            # 记入 stage_errors 并跳过该环节的比对。
+            logger.warning("一致性校验环节 %s 抓取失败,跳过该环节比对: %s", stage.value, exc)
+            stage_errors.append(f"{stage.value}: {exc}")
+            continue
         for raw in records:
             if raw.get("case_id") is None:
                 continue
@@ -679,12 +729,13 @@ async def verify_consistency(
         details={
             "missing_in_snapshot": missing[:_VERIFY_DETAILS_CAP],
             "field_mismatches": mismatches[:_VERIFY_DETAILS_CAP],
+            "stage_errors": stage_errors,
         },
     )
     db.add(report)
     logger.info(
-        "一致性校验完成:比对 %d 件,缺失 %d,不一致 %d,快照多出 %d",
-        len(merged), missing_total, mismatch_total, only_in_snapshot,
+        "一致性校验完成:比对 %d 件,缺失 %d,不一致 %d,快照多出 %d,环节失败 %s",
+        len(merged), missing_total, mismatch_total, only_in_snapshot, stage_errors or "无",
     )
     return {
         "checked": len(merged),
@@ -693,4 +744,5 @@ async def verify_consistency(
         "only_in_snapshot": only_in_snapshot,
         "missing_in_snapshot": missing[:_VERIFY_LIST_CAP],
         "field_mismatches": mismatches[:_VERIFY_LIST_CAP],
+        "stage_errors": stage_errors,
     }

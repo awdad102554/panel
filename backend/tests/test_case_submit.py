@@ -193,7 +193,7 @@ def test_build_payload_rejects_bad_path():
         case_reason="经济补偿争议",
         requests=[RequestSpec(text="x", path_ids=[1, 26, 999])],
     )
-    with pytest.raises(ValueError, match="不存在"):
+    with pytest.raises(ValueError, match="路径无效"):
         build_payload(CASE, bad, CATALOG)
 
 
@@ -435,3 +435,186 @@ def test_validate_case():
     bad = {**CASE, "applicants": [{"name": "张三", "requests": ["要钱"]}]}
     errors, _ = validate_case(bad)
     assert any("身份证" in e for e in errors)
+
+
+
+CASE_REASON_DICT = [
+    "劳动报酬争议", "社会保险争议", "确认劳动关系争议", "合同争议",
+    "经济补偿争议", "赔偿争议", "劳动标准及保护争议", "福利待遇争议", "其他劳动争议",
+]
+
+
+@pytest.fixture
+def fake_internal(monkeypatch):
+    """build_draft 的内网依赖全部换假实现,不打内网。"""
+    from app.services import case_submit
+
+    async def _catalog():
+        return CATALOG
+
+    async def _towns():
+        return []
+
+    async def _dict(key):
+        if key == "case_reason":
+            return [{"name": n} for n in CASE_REASON_DICT]
+        return [{"name": "私营企业"}]
+
+    async def _fill(_applicants, _respondents):
+        return []
+
+    monkeypatch.setattr(case_submit, "get_request_catalog", _catalog)
+    monkeypatch.setattr(case_submit, "get_towns", _towns)
+    monkeypatch.setattr(case_submit, "get_norm_dict", _dict)
+    monkeypatch.setattr(case_submit, "_fill_company_info", _fill)
+    return case_submit
+
+
+async def test_build_draft_case_reason_follows_first_request(fake_internal):
+    """案由默认值跟随第一条请求的第二层类型(内网规律),覆盖案件已填的自由文本。"""
+    case = {**CASE, "case_reason": "确认劳动关系"}
+    draft = await fake_internal.build_draft(case)
+    assert draft["requests"][0]["path_names"][1] == "经济补偿争议"
+    assert draft["defaults"]["case_reason"] == "经济补偿争议"
+
+
+async def test_build_draft_case_reason_fallback_to_filled(fake_internal):
+    """请求猜不出类型时,退回案件已填值的字典模糊匹配。"""
+    case = {
+        **CASE,
+        "case_reason": "确认劳动关系",
+        "applicants": [dict(CASE["applicants"][0], requests=["要求单位赔礼道歉"])],
+    }
+    draft = await fake_internal.build_draft(case)
+    assert draft["requests"][0]["guessed"] is False
+    assert draft["defaults"]["case_reason"] == "确认劳动关系争议"
+
+
+async def test_build_draft_uses_stored_request_spec(fake_internal):
+    """存了结构化请求:直接用存的类型/金额,不猜文本;文本与模板一致时 intro 为空。"""
+    case = {
+        **CASE,
+        "applicants": [
+            dict(
+                CASE["applicants"][0],
+                request_specs=[
+                    {
+                        "path_ids": [1, 26, 28],
+                        "path_names": ["劳动争议", "经济补偿争议", "解除或终止劳动合同经济补偿争议"],
+                        "option": "解除劳动合同的经济补偿",
+                        "object": 53015.63,
+                    }
+                ],
+            )
+        ],
+    }
+    draft = await fake_internal.build_draft(case)
+    entry = draft["requests"][0]
+    assert entry["path_ids"] == [1, 26, 28]
+    assert entry["option"] == "解除劳动合同的经济补偿"
+    assert entry["object"] == 53015.63
+    assert entry["guessed"] is True and entry["intro"] is None
+
+
+async def test_build_draft_spec_edited_text_goes_to_intro(fake_internal):
+    """用户在表单里改过请求文本(与模板生成不一致):文本进 intro 随提交走。"""
+    edited = "请求裁决被申请人支付解除劳动合同的经济补偿53015.63元(含利息)。"
+    case = {
+        **CASE,
+        "applicants": [
+            dict(
+                CASE["applicants"][0],
+                requests=[edited],
+                request_specs=[
+                    {
+                        "path_ids": [1, 26, 28],
+                        "option": "解除劳动合同的经济补偿",
+                        "object": 53015.63,
+                    }
+                ],
+            )
+        ],
+    }
+    draft = await fake_internal.build_draft(case)
+    assert draft["requests"][0]["intro"] == edited
+
+
+async def test_build_draft_stale_spec_falls_back_to_guess(fake_internal):
+    """存的类型已不在内网目录(目录改版):退回文本猜测并提示重新选择。"""
+    case = {
+        **CASE,
+        "applicants": [
+            dict(
+                CASE["applicants"][0],
+                request_specs=[{"path_ids": [1, 26, 999], "option": "解除劳动合同的经济补偿"}],
+            )
+        ],
+    }
+    draft = await fake_internal.build_draft(case)
+    entry = draft["requests"][0]
+    # 退回猜测后仍命中正确路径(文本含选项关键词)
+    assert entry["path_ids"] == [1, 26, 28]
+    assert any("已保存的请求类型" in w for w in draft["warnings"])
+
+
+# 两级叶子(确认劳动关系争议,无第三层)与其他类($other 模板)——2026-08-12 内网实测结构。
+TWO_LEVEL_LEAF = {
+    "path": [
+        {"id": 1, "code": "1", "name": "劳动争议"},
+        {"id": 18, "code": "2", "name": "确认劳动关系争议"},
+    ],
+    "options": [],
+    "template": "请求确认申请人与被申请人于开始日期至结束日期期间存在劳动关系",
+    "other_name": None,
+}
+
+OTHER_LEAF = {
+    "path": [
+        {"id": 1, "code": "1", "name": "劳动争议"},
+        {"id": 43, "code": "2", "name": "其他劳动争议"},
+    ],
+    "options": [],
+    "template": "请求裁决被申请人向申请人支付$other标的元",
+    "other_name": "其他",
+}
+
+
+def test_build_payload_two_level_leaf():
+    """两级叶子(确认劳动关系):type 数组两级,期间模板正常填充。"""
+    spec = SubmitSpec(
+        apply_at=date(2026, 8, 12),
+        case_reason="确认劳动关系争议",
+        requests=[
+            RequestSpec(
+                text="确认劳动关系",
+                path_ids=[1, 18],
+                start_at=date(2020, 1, 1),
+                end_at=date(2026, 1, 31),
+            )
+        ],
+    )
+    req = build_payload(CASE, spec, CATALOG + [TWO_LEVEL_LEAF])["arb_requests"][0]
+    assert [n["id"] for n in req["type"]] == [1, 18]
+    assert req["intro"] == "请求确认申请人与被申请人于2020年01月01日至2026年01月31日期间存在劳动关系。"
+
+
+def test_build_payload_other_template():
+    """$other 模板:other 文本进表述与 other 载荷;缺 other 拒绝(防字面$other进内网)。"""
+    spec = SubmitSpec(
+        apply_at=date(2026, 8, 12),
+        case_reason="其他劳动争议",
+        requests=[
+            RequestSpec(text="其他", path_ids=[1, 43], object=100, other="未缴纳住房公积金损失")
+        ],
+    )
+    req = build_payload(CASE, spec, CATALOG + [OTHER_LEAF])["arb_requests"][0]
+    assert req["intro"] == "请求裁决被申请人向申请人支付未缴纳住房公积金损失100元。"
+    assert req["other"] == {"name": "其他", "value": "未缴纳住房公积金损失"}
+
+    bad = SubmitSpec(
+        apply_at=date(2026, 8, 12),
+        case_reason="其他劳动争议",
+        requests=[RequestSpec(text="其他", path_ids=[1, 43], object=100)],
+    )
+    with pytest.raises(ValueError, match="其他类请求"):
+        build_payload(CASE, bad, CATALOG + [OTHER_LEAF])

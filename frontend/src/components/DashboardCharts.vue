@@ -218,6 +218,8 @@ function resizeAll() {
 }
 
 onMounted(async () => {
+  // 监听器同步注册(不能等 await 之后),否则加载期间离开页面会永久泄漏。
+  window.addEventListener("resize", resizeAll);
   try {
     const data = await dashboardApi.getDashboardCharts();
     empty.value =
@@ -231,7 +233,6 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
-  window.addEventListener("resize", resizeAll);
 });
 
 onBeforeUnmount(() => {

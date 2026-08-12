@@ -19,6 +19,8 @@ onMounted(async () => {
   try {
     items.value = await settingsApi.getTimeLimits();
     edited.value = Object.fromEntries(items.value.map((i) => [i.key, i.value]));
+  } catch {
+    ElMessage.error("时限设置加载失败,请重试");
   } finally {
     loading.value = false;
   }

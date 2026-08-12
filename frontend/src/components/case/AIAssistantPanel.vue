@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ElMessage } from "element-plus";
 import { ref } from "vue";
 
 import * as aiApi from "@/api/ai";
@@ -22,16 +23,22 @@ async function invoke(capability: AICapability) {
   try {
     const output = await aiApi.invokeAICapability(props.caseId, capability);
     outputs.value.unshift(output);
+  } catch {
+    ElMessage.error("AI 调用失败,请重试");
   } finally {
     invoking.value = null;
   }
 }
 
 async function confirm(output: AIOutput) {
-  const confirmed = await aiApi.confirmAIOutput(props.caseId, output.id);
-  const idx = outputs.value.findIndex((item) => item.id === confirmed.id);
-  if (idx !== -1) {
-    outputs.value[idx] = confirmed;
+  try {
+    const confirmed = await aiApi.confirmAIOutput(props.caseId, output.id);
+    const idx = outputs.value.findIndex((item) => item.id === confirmed.id);
+    if (idx !== -1) {
+      outputs.value[idx] = confirmed;
+    }
+  } catch {
+    ElMessage.error("确认失败,请重试");
   }
 }
 </script>

@@ -3,12 +3,33 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import { onMounted, ref } from "vue";
 
 import * as api from "@/api/virtualCases";
-import type { Evidence, Party, VirtualCase } from "@/api/virtualCases";
+import type { CatalogItem, Evidence, Party, VirtualCase } from "@/api/virtualCases";
 import PartyAgentsEditor from "@/components/PartyAgentsEditor.vue";
+import PartyRequestsEditor, { type ReqRow } from "@/components/PartyRequestsEditor.vue";
 import VirtualCaseSubmitDialog from "@/components/VirtualCaseSubmitDialog.vue";
+import { catalogItemOf, isMultiTemplate } from "@/utils/requestCatalog";
+
+// 表单里的当事人:在 Party 基础上带请求编辑器的行状态(保存时拆开,不入库)。
+type PartyForm = Party & { reqRows?: ReqRow[] };
 
 const cases = ref<VirtualCase[]>([]);
 const loading = ref(false);
+
+// 请求类型目录(内网字典):打开新建/编辑对话框时拉一次,失败降级为自由文本录入。
+const catalog = ref<CatalogItem[]>([]);
+let catalogLoading = false;
+
+async function ensureCatalog() {
+  if (catalog.value.length || catalogLoading) return;
+  catalogLoading = true;
+  try {
+    catalog.value = await api.fetchRequestCatalog();
+  } catch {
+    ElMessage.warning("请求类型目录加载失败,可先用自定义文本填写请求");
+  } finally {
+    catalogLoading = false;
+  }
+}
 
 const submitVisible = ref(false);
 const submitTarget = ref<VirtualCase | null>(null);
@@ -23,11 +44,11 @@ const editingId = ref<string | null>(null);
 const saving = ref(false);
 
 const form = ref({ note: "" });
-const applicants = ref<Party[]>([]);
-const respondents = ref<Party[]>([]);
+const applicants = ref<PartyForm[]>([]);
+const respondents = ref<PartyForm[]>([]);
 const evidences = ref<Evidence[]>([]);
 
-function emptyApplicant(): Party {
+function emptyApplicant(): PartyForm {
   return {
     party_type: "natural",
     name: "",
@@ -42,7 +63,8 @@ function emptyApplicant(): Party {
     entry_date: null,
     monthly_wage: null,
     claims: null,
-    requests: [""],
+    requests: [],
+    reqRows: [],
     facts: null,
     legal_person: null,
     legal_title: null,
@@ -50,7 +72,7 @@ function emptyApplicant(): Party {
   };
 }
 
-function emptyRespondent(): Party {
+function emptyRespondent(): PartyForm {
   return { ...emptyApplicant(), party_type: "company" };
 }
 
@@ -61,12 +83,46 @@ function openCreate() {
   respondents.value = [emptyRespondent()];
   evidences.value = [];
   dialogVisible.value = true;
+  ensureCatalog();
 }
 
-function fillRequests(p: Party): string[] {
-  if (p.requests?.length) return [...p.requests];
-  // 旧数据的单一 claims 文本兼容为一条请求。
-  return p.claims ? [p.claims] : [""];
+/** 库里的 requests 文本 + request_specs 结构化数据 → 编辑器行(按索引对齐,
+ * 旧数据没有 specs 的行按自由文本行展示)。结构化行 touched 置 false:改金额/
+ * 期间等字段时自动重生成文本,避免"文本旧金额、spec 新金额"的不一致入库
+ * (用户手动改过文本框才置 true 锁定)。 */
+function buildReqRows(p: Party): ReqRow[] {
+  const texts = p.requests?.length ? [...p.requests] : p.claims ? [p.claims] : [];
+  const specs = p.request_specs ?? [];
+  return texts.map((t, i) => {
+    const s = specs[i];
+    if (s && s.path_ids?.length) {
+      return {
+        free: false,
+        text: t,
+        touched: false,
+        path: [...s.path_ids],
+        path_names: s.path_names ?? [],
+        option: s.option ?? null,
+        object: s.object ?? null,
+        items: (s.items ?? []).map((x) => ({ name: x.name, object: x.object })),
+        start_at: s.start_at ?? null,
+        end_at: s.end_at ?? null,
+        other: s.other ?? "",
+      };
+    }
+    return {
+      free: true,
+      text: t,
+      touched: true,
+      path: [],
+      option: null,
+      object: null,
+      items: [],
+      start_at: null,
+      end_at: null,
+      other: "",
+    };
+  });
 }
 
 function openEdit(row: VirtualCase) {
@@ -75,7 +131,8 @@ function openEdit(row: VirtualCase) {
   applicants.value = row.applicants.map((p) => ({
     ...emptyApplicant(),
     ...p,
-    requests: fillRequests(p),
+    requests: p.requests?.length ? [...p.requests] : [],
+    reqRows: buildReqRows(p),
     agents: (p.agents ?? []).map((a) => ({ ...a })),
   }));
   respondents.value = row.respondents.map((p) => ({
@@ -85,6 +142,7 @@ function openEdit(row: VirtualCase) {
   }));
   evidences.value = (row.evidences ?? []).map((e) => ({ ...e }));
   dialogVisible.value = true;
+  ensureCatalog();
 }
 
 function addItem<T>(list: T[], item: T) {
@@ -162,20 +220,73 @@ async function save() {
     ElMessage.warning("代理人姓名不能为空(或删除该代理人)");
     return;
   }
+  // 结构化行已选类型但文本为空(期间/金额/具体内容没填,模板没生成出来):
+  // 保存会被 filter 静默丢弃,必须拦下让用户补齐或删行。
+  const emptyStructured = applicants.value.some((p) =>
+    (p.reqRows ?? []).some((r) => !r.free && r.path.length > 0 && !r.text.trim()),
+  );
+  if (emptyStructured) {
+    ElMessage.warning('有仲裁请求已选类型但未生成文本:请补齐金额/期间/具体内容(或点"自动生成"),不需要的请删除该行');
+    return;
+  }
+  // 等目录就绪再组装 specs:目录冷拉取(数秒)未完成时直接保存会把结构化数据
+  // 整列覆盖成 null(数据丢失)。
+  await ensureCatalog();
   saving.value = true;
   try {
-    const applicantsClean = applicants.value.map((p) => ({
-      ...p,
-      name: p.name.trim(),
-      claims: null, // claims 已迁移进 requests(fillRequests),清掉避免数据重复残留
-      requests: (p.requests ?? []).filter((r) => r.trim()),
-    }));
+    const applicantsClean = applicants.value.map((p) => {
+      const { reqRows, ...rest } = p;
+      const rows = (reqRows ?? []).filter((r) => r.text.trim());
+      return {
+        ...rest,
+        name: p.name.trim(),
+        claims: null, // claims 已迁移进 requests(buildReqRows),清掉避免数据重复残留
+        requests: rows.map((r) => r.text.trim()),
+        // 与 requests 按索引对齐的结构化数据:自由文本行/未选类型的行存 null。
+        // 提交内网用它免猜类型,申请书合计金额取 object/items 不依赖文本正则。
+        request_specs: rows.map((r) => {
+          if (r.free || !r.path.length) return null;
+          const item = catalogItemOf(catalog.value, r.path);
+          // 目录拉取失败或路径已失效:原样保留结构化数据(后端能识别失效类型并
+          // 提示重选),不静默存 null——结构化信息丢了不可恢复。
+          if (!item) {
+            return {
+              path_ids: r.path,
+              path_names: r.path_names ?? [],
+              option: r.option,
+              object: r.object,
+              items: r.items.filter((i) => i.name),
+              start_at: r.start_at,
+              end_at: r.end_at,
+              other: r.other.trim() || null,
+            };
+          }
+          const multi = isMultiTemplate(item.template ?? "");
+          // 多选项请求 object 与 items 求和保持一致(缺额则置空,不留陈旧金额),
+          // 申请书合计与提交内网都按 object 优先取,口径统一。
+          const complete = r.items.length > 0 && r.items.every((i) => i.object != null);
+          return {
+            path_ids: r.path,
+            path_names: item.path.map((n) => n.name),
+            option: multi ? null : r.option,
+            object: multi
+              ? complete
+                ? r.items.reduce((acc, i) => acc + (i.object ?? 0), 0)
+                : null
+              : r.object,
+            items: r.items.filter((i) => i.name),
+            start_at: r.start_at,
+            end_at: r.end_at,
+            other: r.other.trim() || null,
+          };
+        }),
+      };
+    });
     // 被申请人卡片不展示请求行,清掉继承自申请人结构的空 requests,避免脏数据入库。
-    const respondentsClean = respondents.value.map((p) => ({
-      ...p,
-      name: p.name.trim(),
-      requests: [],
-    }));
+    const respondentsClean = respondents.value.map((p) => {
+      const { reqRows, ...rest } = p;
+      return { ...rest, name: p.name.trim(), requests: [], request_specs: [] };
+    });
     const payload = {
       // 编辑表单没有案由字段:编辑时保留原值,不静默清掉。
       case_reason: editingId.value
@@ -253,20 +364,13 @@ async function markRecorded(row: VirtualCase) {
   }
 }
 
-async function markPending(row: VirtualCase) {
-  try {
-    await api.updateVirtualCaseStatus(row.id, "pending");
-    ElMessage.success(`${row.receipt_number} 已恢复为待录入`);
-    await refresh();
-  } catch (err) {
-    ElMessage.error((await extractErrorDetail(err)) ?? "操作失败,请稍后重试");
-  }
-}
-
 async function removeCase(row: VirtualCase) {
   try {
-    await ElMessageBox.confirm(`确定删除预登记案件 ${row.receipt_number}?`, "删除确认", {
-      type: "warning",
+    await ElMessageBox.confirm(
+      `确定删除预登记案件 ${row.receipt_number}?仅删除本系统的登记记录,不影响内网已生成的收件。`,
+      "删除确认",
+      {
+        type: "warning",
       confirmButtonText: "删除",
       cancelButtonText: "取消",
     });
@@ -354,7 +458,6 @@ onMounted(refresh);
           >
             标记已录入
           </el-button>
-          <el-button v-else size="small" text @click="markPending(row)">恢复待录入</el-button>
           <el-button size="small" text type="danger" @click="removeCase(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -443,29 +546,8 @@ onMounted(refresh);
                 <el-input v-model="p.monthly_wage" placeholder="请输入数额,如:5000" />
               </div>
               <div class="field span4">
-                <div class="requests-header">
-                  <label style="margin-bottom: 0">仲裁请求</label>
-                  <el-button size="small" text type="primary" @click="p.requests.push('')">+ 添加请求</el-button>
-                </div>
-                <div v-for="(_req, reqIdx) in p.requests" :key="reqIdx" class="request-row">
-                  <span class="request-no">请求 {{ reqIdx + 1 }}</span>
-                  <el-input
-                    v-model="p.requests[reqIdx]"
-                    type="textarea"
-                    :rows="2"
-                    placeholder="请具体明确地填写仲裁请求,例如:请求裁决被申请人支付拖欠的工资XXXX元。"
-                    style="flex: 1"
-                  />
-                  <el-button
-                    size="small"
-                    text
-                    type="danger"
-                    :disabled="p.requests.length <= 1"
-                    @click="p.requests.splice(reqIdx, 1)"
-                  >
-                    删除
-                  </el-button>
-                </div>
+                <label>仲裁请求(选类型+金额自动生成文本,可编辑;申请书/提交内网按结构化数据提取)</label>
+                <PartyRequestsEditor :rows="p.reqRows!" :catalog="catalog" />
               </div>
               <div class="field span4">
                 <label>事实与理由</label>
@@ -630,28 +712,6 @@ onMounted(refresh);
 .inline-input {
   display: flex;
   gap: 6px;
-}
-
-.requests-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 6px;
-}
-
-.request-row {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  margin-bottom: 8px;
-}
-
-.request-no {
-  font-size: 13px;
-  color: var(--el-text-color-regular);
-  padding-top: 8px;
-  width: 48px;
-  flex-shrink: 0;
 }
 
 .evidence-row {

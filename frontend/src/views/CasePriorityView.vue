@@ -95,16 +95,24 @@ function urgencyLabel(row: InternalCase) {
   return URGENCY_META[row.urgency as InternalCaseUrgency].label;
 }
 
+// 快速切换筛选时,旧响应不得覆盖新筛选条件的结果。
+let refreshSeq = 0;
+
 async function refresh() {
+  const seq = ++refreshSeq;
   loading.value = true;
   try {
-    cases.value = await internalCaseApi.listInternalCases({
+    const data = await internalCaseApi.listInternalCases({
       stage: stageFilter.value,
       urgency: urgencyFilter.value,
       includeClosed: includeClosed.value,
     });
+    if (seq !== refreshSeq) return;
+    cases.value = data;
+  } catch {
+    if (seq === refreshSeq) ElMessage.error("案件列表加载失败,请稍后重试");
   } finally {
-    loading.value = false;
+    if (seq === refreshSeq) loading.value = false;
   }
 }
 
@@ -148,15 +156,21 @@ async function saveOverride() {
     ElMessage.success("时效覆盖已保存");
     overrideDialogVisible.value = false;
     await refresh();
+  } catch {
+    ElMessage.error("时效覆盖保存失败,请稍后重试");
   } finally {
     overrideSaving.value = false;
   }
 }
 
 async function clearOverride(row: InternalCase) {
-  await internalCaseApi.deleteOverride(row.external_case_id);
-  ElMessage.success("已清除时效覆盖");
-  await refresh();
+  try {
+    await internalCaseApi.deleteOverride(row.external_case_id);
+    ElMessage.success("已清除时效覆盖");
+    await refresh();
+  } catch {
+    ElMessage.error("清除时效覆盖失败,请稍后重试");
+  }
 }
 
 onMounted(refresh);

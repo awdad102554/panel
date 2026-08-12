@@ -38,7 +38,11 @@ const PAGE_SIZE = 20;
 
 const pagedCases = computed(() => cases.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE));
 
+// 快速连点两个卡片时,旧 loader 的响应不得覆盖新标题下的列表。
+let openSeq = 0;
+
 function open(dialogTitle: string, dialogHint: string, loader: () => Promise<InternalCase[]>) {
+  const seq = ++openSeq;
   title.value = dialogTitle;
   hint.value = dialogHint;
   cases.value = [];
@@ -47,13 +51,15 @@ function open(dialogTitle: string, dialogHint: string, loader: () => Promise<Int
   loading.value = true;
   loader()
     .then((items) => {
+      if (seq !== openSeq) return;
       cases.value = items;
     })
     .catch(() => {
+      if (seq !== openSeq) return;
       ElMessage.error("案件明细加载失败,请稍后重试");
     })
     .finally(() => {
-      loading.value = false;
+      if (seq === openSeq) loading.value = false;
     });
 }
 

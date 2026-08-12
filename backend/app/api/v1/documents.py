@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,6 +9,7 @@ from app.api.deps import get_current_user
 from app.core.permissions import Action, require_permission
 from app.db.session import get_db
 from app.models.document import Document, DocumentType
+from app.services import case_service
 
 router = APIRouter(prefix="/cases", tags=["documents"])
 
@@ -50,6 +51,9 @@ async def create_document(
     db: AsyncSession = Depends(get_db),
     _current_user=Depends(require_permission(Action.DOCUMENT_GENERATE)),
 ) -> DocumentOut:
+    case = await case_service.get_case_workspace(db, case_id)
+    if case is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="案件不存在")
     document = Document(case_id=case_id, **payload.model_dump())
     db.add(document)
     await db.commit()

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted } from "vue";
+import { ElMessage } from "element-plus";
+import { computed, onMounted, watch } from "vue";
 
 import AIAssistantPanel from "@/components/case/AIAssistantPanel.vue";
 import CasePortrait from "@/components/case/CasePortrait.vue";
@@ -34,9 +35,23 @@ const currentStageComponent = computed(() => {
   return status ? STAGE_COMPONENTS[status] : null;
 });
 
-onMounted(async () => {
-  await caseStore.fetchCaseWorkspace(props.id);
-});
+async function loadWorkspace(id: string) {
+  try {
+    await caseStore.fetchCaseWorkspace(id);
+  } catch {
+    ElMessage.error("案件加载失败,请稍后重试");
+  }
+}
+
+onMounted(() => loadWorkspace(props.id));
+
+// 同一路由组件复用(/cases/1 → /cases/2)时 onMounted 不会再触发,参数变化需重新加载。
+watch(
+  () => props.id,
+  (id, oldId) => {
+    if (id && id !== oldId) loadWorkspace(id);
+  },
+);
 </script>
 
 <template>

@@ -22,17 +22,22 @@ const loading = ref(false);
 const chartRef = ref<HTMLDivElement>();
 let chart: echarts.ECharts | null = null;
 
+// 快速切换年份时,旧年份的响应不得覆盖新年份的数据。
+let loadSeq = 0;
+
 async function loadYear(year: number) {
+  const seq = ++loadSeq;
   loading.value = true;
   try {
     const data = await statsApi.getYearlyStats(year);
+    if (seq !== loadSeq) return;
     yearly.value = data;
     availableYears.value = data.available_years;
     renderChart();
   } catch {
-    ElMessage.error("年度数据加载失败,请稍后重试");
+    if (seq === loadSeq) ElMessage.error("年度数据加载失败,请稍后重试");
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
 }
 

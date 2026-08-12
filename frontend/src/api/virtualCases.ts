@@ -21,6 +21,23 @@ export interface Agent {
   job: string | null;
 }
 
+export interface RequestItem {
+  name: string;
+  object: number | null;
+}
+
+/** 预登记存的结构化仲裁请求(与 requests 文本按索引对齐,null=自由文本行)。 */
+export interface RequestSpecData {
+  path_ids: number[];
+  path_names?: string[];
+  option: string | null;
+  object: number | null;
+  items: RequestItem[];
+  start_at: string | null;
+  end_at: string | null;
+  other?: string | null;
+}
+
 export interface Party {
   party_type: "natural" | "company";
   name: string;
@@ -36,6 +53,7 @@ export interface Party {
   monthly_wage: string | null;
   claims: string | null;
   requests: string[];
+  request_specs?: (RequestSpecData | null)[];
   facts: string | null;
   legal_person: string | null;
   legal_title: string | null;
@@ -154,6 +172,7 @@ export interface CatalogItem {
   path: CatalogNode[];
   options: string[];
   template: string;
+  other_name?: string | null;
 }
 
 export interface SubmitDraftRequest {
@@ -162,6 +181,10 @@ export interface SubmitDraftRequest {
   path_names: string[] | null;
   option: string | null;
   object: number | null;
+  items: RequestItem[];
+  start_at: string | null;
+  end_at: string | null;
+  other?: string | null;
   intro: string | null;
   guessed: boolean;
 }
@@ -206,11 +229,6 @@ export interface SubmitDraft {
   };
 }
 
-export interface RequestItem {
-  name: string;
-  object: number | null;
-}
-
 export interface RequestSpec {
   text: string;
   path_ids: number[];
@@ -219,6 +237,7 @@ export interface RequestSpec {
   items: RequestItem[];
   start_at: string | null;
   end_at: string | null;
+  other: string | null;
   intro: string | null;
 }
 
@@ -252,6 +271,13 @@ export function submitPreview(id: string, spec: SubmitSpec) {
 
 export function submitToInternal(id: string, spec: SubmitSpec) {
   return apiClient
-    .post<{ code: number; data: unknown }>(`/virtual-cases/${id}/submit`, spec)
+    .post<{ code: number; data: unknown; warning?: string | null }>(`/virtual-cases/${id}/submit`, spec)
     .then((res) => res.data);
+}
+
+/** 仲裁请求类型目录(三级路径+第四级选项+表述模板),供预登记表单结构化录入请求。 */
+export function fetchRequestCatalog() {
+  return apiClient
+    .get<{ data?: CatalogItem[] }>("/virtual-cases/meta/request-catalog")
+    .then((res) => res.data?.data ?? []);
 }

@@ -85,21 +85,31 @@ async function handleSubmit() {
     }
     dialogVisible.value = false;
     await refresh();
+  } catch {
+    ElMessage.error("保存失败,请重试");
   } finally {
     submitting.value = false;
   }
 }
 
 async function handleEnable(row: AIModelConfig) {
-  await modelApi.enableModel(row.id);
-  ElMessage.success(`已启用「${row.name}」`);
-  await refresh();
+  try {
+    await modelApi.enableModel(row.id);
+    ElMessage.success(`已启用「${row.name}」`);
+    await refresh();
+  } catch {
+    ElMessage.error("启用失败,请重试");
+  }
 }
 
 async function handleDelete(row: AIModelConfig) {
-  await modelApi.deleteModel(row.id);
-  ElMessage.success("已删除");
-  await refresh();
+  try {
+    await modelApi.deleteModel(row.id);
+    ElMessage.success("已删除");
+    await refresh();
+  } catch {
+    ElMessage.error("删除失败,请重试");
+  }
 }
 
 onMounted(refresh);

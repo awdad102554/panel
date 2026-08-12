@@ -20,7 +20,7 @@ import time
 from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.integrations.case_system.client import (
     CaseSystemError,
@@ -86,32 +86,49 @@ async def get_request_catalog() -> list[dict]:
     if cached and time.monotonic() - cached[0] < _CACHE_TTL:
         return cached[1]
     tree = await get_arb_tree()
-    leaves: list[tuple[dict, dict, dict]] = []  # (l1, l2, l3)
+    leaves: list[tuple[dict, dict, dict | None]] = []  # (l1, l2, l3);l3=None 为两级叶子
     for l1 in tree:
         for l2 in l1.get("data") or l1.get("children") or []:
-            for l3 in l2.get("data") or l2.get("children") or []:
-                leaves.append((l1, l2, l3))
+            l3s = l2.get("data") or l2.get("children") or []
+            if l3s:
+                for l3 in l3s:
+                    leaves.append((l1, l2, l3))
+            else:
+                # 没有第三层的二级节点本身就是叶子(确认劳动关系争议/其他劳动争议等,
+                # 2026-08-12 实测 7 个)——漏掉会让这类最常见的类型在表单里选不到。
+                leaves.append((l1, l2, None))
     details = await asyncio.gather(
-        *(get_request_leaf(l3["id"]) for _, _, l3 in leaves), return_exceptions=True
+        *(get_request_leaf((l3 or l2)["id"]) for _, l2, l3 in leaves), return_exceptions=True
     )
+    failed = 0
     catalog: list[dict] = []
     for (l1, l2, l3), detail in zip(leaves, details):
         if isinstance(detail, Exception):
-            logger.warning("仲裁请求叶子详情拉取失败 id=%s: %s", l3["id"], detail)
+            failed += 1
+            logger.warning("仲裁请求叶子详情拉取失败 id=%s: %s", (l3 or l2)["id"], detail)
             detail = {}
         options = (detail.get("arr") or [[]])[0] or []
+        other = detail.get("other")
         catalog.append(
             {
                 "path": [
-                    {"id": l1["id"], "code": l1.get("code", ""), "name": l1["name"]},
-                    {"id": l2["id"], "code": l2.get("code", ""), "name": l2["name"]},
-                    {"id": l3["id"], "code": l3.get("code", ""), "name": l3["name"]},
+                    {"id": n["id"], "code": n.get("code", ""), "name": n["name"]}
+                    for n in (l1, l2, l3)
+                    if n is not None
                 ],
                 "options": options,
                 "template": detail.get("template") or "",
+                # $other 模板的"其他"描述(组装载荷时 other={"name":..,"value":用户文本})
+                "other_name": other.get("name") if isinstance(other, dict) else None,
             }
         )
-    _cache["arb_catalog"] = (time.monotonic(), catalog)
+    # 有叶子失败时不写缓存:残缺目录(options=[]/template="")若缓存 6 小时,
+    # 期间落在失败叶子上的提交会被 422 误杀(自检发现 2026-08-12)。本次仍返回,
+    # 下次调用重试拉全。
+    if failed:
+        logger.warning("仲裁请求目录 %d 个叶子拉取失败,本次不缓存", failed)
+    else:
+        _cache["arb_catalog"] = (time.monotonic(), catalog)
     return catalog
 
 
@@ -165,7 +182,8 @@ class RequestItem(BaseModel):
     """第四级选项+单项金额(多选项请求,如工伤保险待遇的各费用项,样例2)。"""
 
     name: str
-    object: float | None = None
+    # allow_inf_nan=False:裸 float 会接受 NaN/Infinity 字面量,进内网请求体即脏数据。
+    object: float | None = Field(default=None, allow_inf_nan=False)
 
 
 class RequestSpec(BaseModel):
@@ -176,12 +194,13 @@ class RequestSpec(BaseModel):
     期间类请求)用 start_at/end_at(样例3)。"""
 
     text: str  # 预登记原始自由文本(兜底 intro)
-    path_ids: list[int]  # [一级id, 二级id, 三级id]
+    path_ids: list[int]  # 类型树节点 id(三级;确认劳动关系等两级叶子为两级)
     option: str | None = None  # 第四级选项(无金额类请求可为空)
-    object: float | None = None  # 标的金额(确认劳动关系等无金额请求为空)
+    object: float | None = Field(default=None, allow_inf_nan=False)  # 标的金额(确认劳动关系等无金额请求为空)
     items: list[RequestItem] = []  # 多选项明细(优先级高于 option)
     start_at: date | None = None  # 期间起(模板含"开始日期"时必填)
     end_at: date | None = None  # 期间止(模板含"结束日期"时必填)
+    other: str | None = None  # $other 模板(其他类请求)的具体内容
     intro: str | None = None  # 请求表述;为空时按模板自动生成,生成不了退回 text
 
 
@@ -201,7 +220,7 @@ class SubmitSpec(BaseModel):
     case_reason: str
     is_sign_labor_contract: int = 1
     is_pay_social_insurance: int = 1
-    is_easy: int = 1  # 是否简易案件(样例1小额=1/样例2工伤20万=0,规则不明,界面可改)
+    is_easy: int = 1  # 是否简易案件(规则经确认:默认 1,用户可在提交界面改)
     company_nature: str = DEFAULT_COMPANY_NATURE
     id_type: str = DEFAULT_ID_TYPE  # 申请人证件类型(字典 worker_id_type,默认居民身份证)
     is_migrant_worker: int = 0  # 农民工标志(作用于全部申请人;内网默认否)
@@ -347,12 +366,14 @@ def _fill_template(
     items: list[RequestItem] | None = None,
     start_at: date | None = None,
     end_at: date | None = None,
+    other_text: str | None = None,
 ) -> str | None:
     """按内网模板生成请求表述。含无法填充的占位时返回 None。
 
     $str 模板(样例2 工伤保险待遇):$str 替换为"（1）选项名金额元、（2）…"枚举,
     需要 items 且每项有金额。开始日期/结束日期 占位(样例3 工资争议)用 start_at/end_at,
     格式为零填充"2026年07月29日"(与内网 moment YYYY年MM月DD日 一致)。
+    $other 占位(其他类请求,如其他劳动报酬争议)用 other_text(用户自填的具体内容)。
     """
     if not template:
         return None
@@ -365,6 +386,10 @@ def _fill_template(
             for n, i in enumerate(items, start=1)
         )
         out = out.replace("$str", enum)
+    if "$other" in out:
+        if not other_text or not other_text.strip():
+            return None
+        out = out.replace("$other", other_text.strip())
     if "选项2" in out:
         return None
     if "选项1" in out:
@@ -558,11 +583,10 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
     by_leaf = {item["path"][-1]["id"]: item for item in catalog}
     arb_requests: list[dict] = []
     for req in spec.requests:
-        if len(req.path_ids) != 3:
-            raise ValueError(f"仲裁请求类型路径必须是三级: {req.text[:20]}")
-        leaf = by_leaf.get(req.path_ids[-1])
-        if leaf is None:
-            raise ValueError(f"仲裁请求类型不存在(id={req.path_ids[-1]}): {req.text[:20]}")
+        leaf = by_leaf.get(req.path_ids[-1]) if req.path_ids else None
+        # 末级 id 命中且完整路径一致才认(两级叶子如确认劳动关系也是合法路径)。
+        if leaf is None or [n["id"] for n in leaf["path"]] != list(req.path_ids):
+            raise ValueError(f"仲裁请求类型路径无效: {req.text[:20]}")
         option_names = [o for o in leaf["options"]]
         if req.items:
             bad = [i.name for i in req.items if i.name not in option_names]
@@ -579,6 +603,13 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
         obj = req.object
         if req.items and obj is None:
             obj = sum(i.object for i in req.items)
+        # $other 模板(其他类请求):必须填具体内容,否则字面"$other"会进内网表述。
+        template = leaf["template"] or ""
+        other_payload: dict = {}
+        if "$other" in template:
+            if not (req.other or "").strip():
+                raise ValueError(f"其他类请求需要填写具体内容: {req.text[:20]}")
+            other_payload = {"name": leaf.get("other_name") or "其他", "value": req.other.strip()}
         names = [i.name for i in req.items] if req.items else ([req.option] if req.option else [])
         level4_arr = (
             [{"name": i.name, "object": i.object} for i in req.items]
@@ -588,7 +619,8 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
         intro = (
             req.intro
             or _fill_template(
-                leaf["template"], req.option, obj, req.items or None, req.start_at, req.end_at
+                template, req.option, obj, req.items or None, req.start_at, req.end_at,
+                req.other,
             )
             or req.text
         )
@@ -599,7 +631,7 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
             "intro": intro,
             "opt": [names],
             "level4_arr": level4_arr,
-            "other": {},
+            "other": other_payload,
         }
         # 期间类请求(样例3 工资争议):模板含开始/结束日期时带上起止。
         if req.start_at:
@@ -698,6 +730,64 @@ async def _fill_company_info(applicants: list[dict], respondents: list[dict]) ->
     return fills
 
 
+def _draft_from_spec(text: str, spec: dict, catalog: list[dict]) -> dict | None:
+    """预登记存了结构化请求(新版表单):直接用存的类型/金额,不再猜文本。
+
+    存的类型在内网目录里已不存在(目录改版)时返回 None,退回文本猜测。
+    用户在表单里手动改过请求文本(与模板生成不一致)时,文本带进 intro 随提交走。
+    """
+    path_ids = spec.get("path_ids")
+    if not path_ids:
+        return None
+    item = next((c for c in catalog if [n["id"] for n in c["path"]] == list(path_ids)), None)
+    if item is None:
+        return None
+    option = spec.get("option")
+    notes: list[str] = []
+    if option and option not in (item.get("options") or []):
+        notes.append(f"已保存的第四级选项[{option}]在内网目录中不存在,已置空请重新选择")
+        option = None
+    valid_options = set(item.get("options") or [])
+    items = [
+        RequestItem(name=i["name"], object=i.get("object"))
+        for i in spec.get("items") or []
+        if isinstance(i, dict) and i.get("name")
+    ]
+    if items and valid_options:
+        stale = [i.name for i in items if i.name not in valid_options]
+        if stale:
+            notes.append(f"已保存的费用项不在内网目录中: {'、'.join(stale)}")
+    obj = spec.get("object")
+    if obj is None and items and all(i.object is not None for i in items):
+        obj = sum(i.object for i in items)
+    start = _to_date_str(spec.get("start_at"))
+    end = _to_date_str(spec.get("end_at"))
+    start_d = date.fromisoformat(start) if start else None
+    end_d = date.fromisoformat(end) if end else None
+    other = (spec.get("other") or "").strip() or None
+    intro = None
+    generated = _fill_template(
+        item.get("template") or "", option, obj, items or None, start_d, end_d, other
+    )
+    if generated and text.strip() and text.strip() != generated:
+        intro = text.strip()  # 用户改过的文本优先于模板
+    return {
+        "text": text,
+        "path_ids": [n["id"] for n in item["path"]],
+        "path_names": [n["name"] for n in item["path"]],
+        "option": option,
+        "object": obj,
+        "items": [{"name": i.name, "object": i.object} for i in items],
+        "start_at": start,
+        "end_at": end,
+        "other": other,
+        "intro": intro,
+        "guessed": True,
+        # 延后提示:warnings 列表在 build_draft 后段才初始化,由那里统一 pop 出来
+        "notes": notes,
+    }
+
+
 async def build_draft(case: dict) -> dict:
     """submit-draft:自动猜测 + 企业信息回填 + 校验,供前端对话框展示/修改。"""
     # catalog 是必需的(请求类型猜测/组装都靠它);towns/案由等仅作前端下拉,
@@ -725,20 +815,29 @@ async def build_draft(case: dict) -> dict:
 
     requests_draft: list[dict] = []
     for p in applicants:
-        for text in p.get("requests") or []:
-            guess = guess_request(text, catalog) or {}
-            option = guess.get("option")
-            requests_draft.append(
-                {
+        specs = p.get("request_specs") or []
+        for i, text in enumerate(p.get("requests") or []):
+            spec = specs[i] if i < len(specs) and isinstance(specs[i], dict) else None
+            entry = _draft_from_spec(text, spec, catalog) if spec else None
+            if entry is None:
+                guess = guess_request(text, catalog) or {}
+                option = guess.get("option")
+                entry = {
                     "text": text,
                     "path_ids": guess.get("path_ids"),
                     "path_names": guess.get("path_names"),
                     "option": option,
                     "object": guess_amount(text, option),
+                    "items": [],
+                    "start_at": None,
+                    "end_at": None,
+                    "other": None,
                     "intro": None,
                     "guessed": bool(guess),
+                    # 存的类型已不在目录:标记,统一在 warnings 初始化后提示
+                    "stale_spec": bool(spec),
                 }
-            )
+            requests_draft.append(entry)
     # 旧版单一 claims 兼容:没有 requests 时按一条自由文本请求处理。
     if not requests_draft and case.get("claims"):
         requests_draft.append(
@@ -748,6 +847,10 @@ async def build_draft(case: dict) -> dict:
                 "path_names": None,
                 "option": None,
                 "object": guess_amount(case["claims"], None),
+                "items": [],
+                "start_at": None,
+                "end_at": None,
+                "other": None,
                 "intro": None,
                 "guessed": False,
             }
@@ -766,21 +869,30 @@ async def build_draft(case: dict) -> dict:
     )
     fact_content = existing_facts or compose_facts(first, 1, 1)
     for r in requests_draft:
+        if r.pop("stale_spec", False):
+            warnings.append(f"已保存的请求类型在内网目录中不存在,请重新选择: {r['text'][:30]}")
+        warnings.extend(r.pop("notes", []))
         if not r["guessed"]:
             warnings.append(f"仲裁请求未能自动匹配类型,请人工选择: {r['text'][:30]}")
 
-    # 案由默认值:优先案件已填且能在字典里精确/模糊匹配的值;匹配不上置空并提示
+    # 案由默认值:与内网一致的规律——跟随第一条请求的第二层类型自动选择
+    # (案由字典就是请求树第二层名称的集合,2026-08-12 与内网核对)。
+    # 推不出时退回案件已填值的精确/模糊匹配;还不行置空并提示
     # (原值静默丢弃会让用户以为案由已选好)。
-    case_reason = case.get("case_reason") or ""
     dict_names = [d["name"] for d in case_reasons]
-    if case_reason and case_reason not in dict_names:
-        matched = next(
-            (n for n in dict_names if case_reason and (case_reason in n or n in case_reason)),
-            "",
-        )
-        if not matched:
-            warnings.append(f"已填案由[{case_reason}]不在内网字典中,请人工选择")
-        case_reason = matched
+    case_reason = ""
+    first_path = (requests_draft[0].get("path_names") or []) if requests_draft else []
+    if len(first_path) >= 2 and first_path[1] in dict_names:
+        case_reason = first_path[1]
+    if not case_reason:
+        filled = case.get("case_reason") or ""
+        if filled in dict_names:
+            case_reason = filled
+        elif filled:
+            matched = next((n for n in dict_names if filled in n or n in filled), "")
+            if not matched:
+                warnings.append(f"已填案由[{filled}]不在内网字典中,请人工选择")
+            case_reason = matched
 
     return {
         "defaults": {

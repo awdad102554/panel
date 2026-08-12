@@ -5,6 +5,7 @@
 数据共享代理接口,认证复用 CaseSystemClient,不依赖 InfoWeb 在线。
 """
 
+import asyncio
 import logging
 import tempfile
 from datetime import date, datetime
@@ -40,6 +41,12 @@ router = APIRouter(prefix="/virtual-cases", tags=["virtual-cases"])
 logger = logging.getLogger(__name__)
 
 
+# 提交内网互斥锁(模块级一把):submit_to_internal 先查状态、关 session、await 数秒
+# 网络调用后才落状态,不加锁时两个并发请求都能通过"未录入"检查,导致内网重复建案。
+# 提交是低频人工操作,一把全局锁即可(单 worker)。
+_SUBMIT_LOCK = asyncio.Lock()
+
+
 _PARTY_TYPES = ("natural", "company")
 
 
@@ -68,6 +75,29 @@ class AgentIn(BaseModel):
     job: str | None = None
 
 
+class RequestItemIn(BaseModel):
+    """多选项请求的单项明细(如工伤保险待遇的各费用项)。"""
+
+    name: str
+    # allow_inf_nan=False:裸 float 接受 NaN/Infinity 字面量,落库即脏数据。
+    object: float | None = Field(default=None, allow_inf_nan=False)
+
+
+class RequestSpecIn(BaseModel):
+    """结构化仲裁请求(新版预登记表单录入):与 requests 文本按索引对齐,
+    None 表示该行是自由文本。存了类型/金额后,提交内网不再猜文本、
+    申请书合计金额直接取 object/items,不依赖文本正则。"""
+
+    path_ids: list[int]  # 类型树节点 id(三级;两级叶子为两级)
+    path_names: list[str] = []
+    option: str | None = None  # 第四级选项
+    object: float | None = Field(default=None, allow_inf_nan=False)  # 标的金额
+    items: list[RequestItemIn] = []  # 多选项明细
+    start_at: str | None = None  # 期间起(YYYY-MM-DD,期间类模板)
+    end_at: str | None = None  # 期间止
+    other: str | None = None  # $other 模板(其他类请求)的具体内容
+
+
 class PartyIn(BaseModel):
     """当事人。字段与 InfoWeb 新建案件表单对齐:
     自然人用 name/gender/ethnicity/birth_date/id_number/address/phone 等;
@@ -88,6 +118,7 @@ class PartyIn(BaseModel):
     monthly_wage: str | None = None  # 月工资
     claims: str | None = None  # 旧版单一仲裁请求文本(兼容);新表单用 requests
     requests: list[str] = []  # 仲裁请求列表(申请人,每人可多条,可增删行)
+    request_specs: list[RequestSpecIn | None] = []  # 与 requests 对齐的结构化数据(旧数据为空)
     facts: str | None = None  # 事实与理由(申请人,每人一条)
     legal_person: str | None = None  # 法定代表人(公司)
     legal_title: str | None = None  # 职务(公司)
@@ -142,6 +173,17 @@ def _parse_parties(items: list | None) -> list[PartyIn]:
             except (ValidationError, TypeError):
                 logger.warning("预登记代理人数据异常,已跳过: %s", (a or {}).get("name") if isinstance(a, dict) else a)
         p["agents"] = agents
+        specs: list[RequestSpecIn | None] = []
+        for s in p.get("request_specs") or []:
+            if s is None:
+                specs.append(None)
+                continue
+            try:
+                specs.append(RequestSpecIn(**s))
+            except (ValidationError, TypeError):
+                logger.warning("预登记结构化请求数据异常,已按自由文本处理: %s", p.get("name"))
+                specs.append(None)
+        p["request_specs"] = specs
         try:
             out.append(PartyIn(**p))
         except ValidationError:
@@ -288,7 +330,7 @@ async def delete_virtual_case(
 
 
 class StatusUpdate(BaseModel):
-    status: str  # recorded / pending
+    status: str  # 仅允许 recorded(已录入为终态,不可恢复待录入)
 
 
 @router.put("/{case_id}/status", response_model=VirtualCaseOut)
@@ -297,9 +339,13 @@ async def update_virtual_case_status(
     payload: StatusUpdate,
     _current_user: User = Depends(get_current_user),
 ) -> VirtualCaseOut:
-    """标记已录入内网 / 恢复待录入。"""
-    if payload.status not in ("pending", "recorded"):
-        raise HTTPException(status_code=422, detail="status 只能是 pending 或 recorded")
+    """标记已录入内网。recorded 为终态:已录入的案件后续修改直接在内网进行,
+    不允许恢复待录入(恢复后再提交会在内网重复建案)。"""
+    if payload.status != "recorded":
+        raise HTTPException(
+            status_code=422,
+            detail="已录入的案件不可恢复待录入;如需重新申报,请删除本地记录后重新登记",
+        )
     async with VirtualSessionLocal() as db:
         row = await db.get(VirtualCase, case_id)
         if row is None:
@@ -435,41 +481,61 @@ async def submit_to_internal(
     事务与网络调用分离:先读案件关 session 再提交内网(避免持库等网络放大
     SQLite locked),内网成功后再开新 session 落状态;状态落库失败不影响已建案
     事实,返回 warning 让前端提示人工核对(自检发现 2026-08-11)。
-    """
-    async with VirtualSessionLocal() as db:
-        row = await db.get(VirtualCase, case_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="预登记案件不存在")
-        if row.status == "recorded":
-            raise HTTPException(status_code=409, detail="该案件已录入内网,请勿重复提交")
-        case = _row_to_case_dict(row)
-        receipt_number = row.receipt_number
-    try:
-        data = await submit_case(case, spec)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except DuplicateCaseWarning as exc:
-        # 内网提示疑似重复案件:返回 409,前端弹确认后带 force=true 重试。
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except CaseSystemError as exc:
-        logger.warning("提交内网收件失败[%s]: %s", receipt_number, exc)
-        message = str(exc)
-        # 网络层失败(超时/不可达)时请求可能已到内网并建案,不能笼统报失败。
-        if "request_failed" in message or "retry_failed" in message:
-            message = "内网响应异常,提交结果未知——请先到内网收件列表核实是否已生成,避免重复提交"
-        raise HTTPException(status_code=502, detail=message) from exc
 
-    warning = None
-    try:
+    整个处理在模块级 _SUBMIT_LOCK 内执行:状态检查与内网提交之间隔着数秒网络
+    调用,不加锁时并发请求会双双通过"未录入"检查,造成内网重复建案。
+    """
+    async with _SUBMIT_LOCK:
         async with VirtualSessionLocal() as db:
             row = await db.get(VirtualCase, case_id)
-            row.status = "recorded"
-            row.note = (row.note or "") + f" [已提交内网收件 {datetime.now():%Y-%m-%d %H:%M}]"
-            await db.commit()
-    except Exception:
-        logger.exception("内网已建案但预登记状态更新失败[%s]: %s", receipt_number, data)
-        warning = "内网已生成收件,但本地状态更新失败,请人工核对后标记已录入"
-    return {"code": 200, "data": data, "warning": warning}
+            if row is None:
+                raise HTTPException(status_code=404, detail="预登记案件不存在")
+            if row.status == "recorded":
+                raise HTTPException(status_code=409, detail="该案件已录入内网,请勿重复提交")
+            case = _row_to_case_dict(row)
+            receipt_number = row.receipt_number
+        try:
+            data = await submit_case(case, spec)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except DuplicateCaseWarning as exc:
+            # 内网提示疑似重复案件:返回 409,前端弹确认后带 force=true 重试。
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CaseSystemError as exc:
+            logger.warning("提交内网收件失败[%s]: %s", receipt_number, exc)
+            message = str(exc)
+            # 网络层失败(超时/不可达)或内网 5xx 时请求可能已到内网并建案,不能笼统报失败。
+            if (
+                "request_failed" in message
+                or "retry_failed" in message
+                or "receive/add http_5" in message
+            ):
+                message = "内网响应异常,提交结果未知——请先到内网收件列表核实是否已生成,避免重复提交"
+            raise HTTPException(status_code=502, detail=message) from exc
+
+        warning = None
+        try:
+            async with VirtualSessionLocal() as db:
+                row = await db.get(VirtualCase, case_id)
+                row.status = "recorded"
+                row.note = (row.note or "") + f" [已提交内网收件 {datetime.now():%Y-%m-%d %H:%M}]"
+                await db.commit()
+        except Exception:
+            logger.exception("内网已建案但预登记状态更新失败[%s]: %s", receipt_number, data)
+            warning = "内网已生成收件,但本地状态更新失败,请人工核对后标记已录入"
+        return {"code": 200, "data": data, "warning": warning}
+
+
+@router.get("/meta/request-catalog")
+async def request_catalog_endpoint(
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """仲裁请求类型目录(三级路径+第四级选项+表述模板),供预登记表单结构化录入请求。"""
+    try:
+        return {"code": 200, "data": await get_request_catalog()}
+    except CaseSystemError as exc:
+        logger.warning("请求类型目录拉取失败: %s", exc)
+        raise HTTPException(status_code=502, detail="内网字典服务不可用,请稍后重试") from exc
 
 
 @router.get("/lookup/person")
