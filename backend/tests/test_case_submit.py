@@ -183,7 +183,13 @@ def test_build_payload_matches_sample_structure():
     fr = payload["fact_reason"]
     assert fr["entry_at"] == "2011-01-01"
     assert fr["salary"] == 3656.25
-    assert fr["content"] == "本人于2011年入职……"
+    # facts 是补充事实:拼在自动骨架的合同社保段后(2026-08-13 起,不再是整段替换)
+    assert fr["content"] == (
+        "本人于2011年01月01日入职被申请人处, 月工资标准为3656.25元。"
+        "本人入职后，被申请人有与本人签订书面劳动合同,有为本人缴纳社会保险费;"
+        "本人于2011年入职……。"
+        "为维护本人合法权益，特提出申请，望裁如所请。"
+    )
     assert payload["receive_info"] == {"next_step": 1, "application_at": "2026-05-20"}
 
 
@@ -274,14 +280,15 @@ def test_build_payload_multi_option_request():
 
 
 def test_compose_facts_and_overrides():
-    """事实理由自动生成(内网模板) + main_cause/fact_content 覆盖。"""
+    """事实理由自动生成(内网样本四段式) + main_cause/fact_content 覆盖。"""
     from app.services.case_submit import compose_facts
 
-    first = CASE["applicants"][0]
+    first = CASE["applicants"][0]  # 含补充事实 facts="本人于2011年入职……"
     text = compose_facts(first, 1, 1, ["被申请人违法解除与申请人劳动关系，请求支付赔偿金"])
     assert text == (
         "本人于2011年01月01日入职被申请人处, 月工资标准为3656.25元。"
         "本人入职后，被申请人有与本人签订书面劳动合同,有为本人缴纳社会保险费;"
+        "本人于2011年入职……。"
         "因被申请人违法解除与申请人劳动关系，请求支付赔偿金。"
         "为维护本人合法权益，特提出申请，望裁如所请。"
     )
@@ -290,9 +297,36 @@ def test_compose_facts_and_overrides():
     assert "因申请人负工伤，被申请人拒绝支付工伤保险待遇，其他补充。" in text_multi
     # 无主因:分号变句号
     text2 = compose_facts(first, 0, 0)
-    assert "没有与本人签订书面劳动合同,没有为本人缴纳社会保险费。为维护" in text2
+    assert "没有与本人签订书面劳动合同,没有为本人缴纳社会保险费" in text2
     # 缺入职信息:省略首段
     assert compose_facts({}, 1, 1).startswith("本人入职后")
+    # 月工资 0 省略工资片段(内网真实样本如此)
+    assert "月工资标准" not in compose_facts({**first, "monthly_wage": "0"}, 1, 1)
+
+
+def test_compose_case_facts_multi_applicant():
+    """多申请人:逐申请人分段(主体申请人1/2),案件级主因只并入第一申请人段。"""
+    from app.services.case_submit import compose_case_facts
+
+    applicants = [
+        {**CASE["applicants"][0], "facts": None, "main_causes": []},
+        {
+            **CASE["applicants"][0],
+            "name": "李四",
+            "entry_date": "2021-03-01",
+            "monthly_wage": "4000",
+            "facts": None,
+            "main_causes": [],
+        },
+    ]
+    text = compose_case_facts(applicants, 1, 1, ["被申请人未及时足额支付劳动报酬"])
+    paras = text.split("\n")
+    assert len(paras) == 3  # 两申请人段 + 结尾
+    assert paras[0].startswith("申请人1于2011年01月01日入职被申请人处")
+    assert ";因被申请人未及时足额支付劳动报酬。" in paras[0]
+    assert paras[1].startswith("申请人2于2021年03月01日入职被申请人处")
+    assert "因" not in paras[1]  # 案件级主因不重复进第二段
+    assert paras[2] == "为维护本人合法权益，特提出申请，望裁如所请。"
 
     # spec.fact_content 优先于 facts/自动生成
     case_no_facts = {
@@ -470,12 +504,30 @@ def fake_internal(monkeypatch):
     return case_submit
 
 
-async def test_build_draft_case_reason_follows_first_request(fake_internal):
-    """案由默认值跟随第一条请求的第二层类型(内网规律),覆盖案件已填的自由文本。"""
+async def test_build_draft_case_reason_follows_last_request(fake_internal):
+    """案由默认值跟随**最后一条**请求的第二层类型(内网服务端按末请求覆盖,
+    2026-08-12 多类型案件实测),覆盖案件已填的自由文本。"""
     case = {**CASE, "case_reason": "确认劳动关系"}
     draft = await fake_internal.build_draft(case)
     assert draft["requests"][0]["path_names"][1] == "经济补偿争议"
     assert draft["defaults"]["case_reason"] == "经济补偿争议"
+
+    # 多条请求:首条经济补偿、末条赔偿 → 案由取末条的"赔偿争议"
+    multi = {
+        **case,
+        "applicants": [
+            dict(
+                CASE["applicants"][0],
+                requests=[
+                    "请求裁决被申请人向申请人支付解除劳动合同的经济补偿53015.63元。",
+                    "被申请人支付申请人违法解除劳动合同赔偿金4600元",
+                ],
+            )
+        ],
+    }
+    draft2 = await fake_internal.build_draft(multi)
+    assert draft2["requests"][1]["path_names"][1] == "赔偿争议"
+    assert draft2["defaults"]["case_reason"] == "赔偿争议"
 
 
 async def test_build_draft_case_reason_fallback_to_filled(fake_internal):
@@ -618,3 +670,87 @@ def test_build_payload_other_template():
     )
     with pytest.raises(ValueError, match="其他类请求"):
         build_payload(CASE, bad, CATALOG + [OTHER_LEAF])
+
+
+CASE_TWO_APPLICANTS = {
+    **CASE,
+    "applicants": [
+        CASE["applicants"][0],
+        dict(CASE["applicants"][0], name="郭庆梅", id_number="350481197708044044"),
+    ],
+}
+
+
+def test_disambiguate_applicant_rules():
+    from app.services.case_submit import _disambiguate_applicant
+
+    assert (
+        _disambiguate_applicant("请求裁决被申请人向申请人支付工资100元。", 2)
+        == "请求裁决被申请人向申请人2支付工资100元。"
+    )
+    # 幂等:已编号的不重复加
+    assert _disambiguate_applicant("向申请人1支付", 1) == "向申请人1支付"
+
+
+def test_build_payload_multi_applicant_marks_intro():
+    """多申请人:每条请求按归属申请人加编号(intro/模板/原文三条路径都覆盖)。"""
+    spec = SubmitSpec(
+        apply_at=date(2026, 5, 20),
+        case_reason="经济补偿争议",
+        requests=[
+            RequestSpec(
+                text="请求裁决被申请人向申请人支付解除劳动合同的经济补偿53015.63元。",
+                path_ids=[1, 26, 28],
+                applicant_index=0,
+                option="解除劳动合同的经济补偿",
+                object=53015.63,
+            ),
+            RequestSpec(
+                text="请求裁决被申请人向申请人支付解除劳动合同的经济补偿6000元。",
+                path_ids=[1, 26, 28],
+                applicant_index=1,
+                option="解除劳动合同的经济补偿",
+                object=6000,
+            ),
+        ],
+    )
+    reqs = build_payload(CASE_TWO_APPLICANTS, spec, CATALOG)["arb_requests"]
+    assert "向申请人1支付" in reqs[0]["intro"]
+    assert "向申请人2支付" in reqs[1]["intro"]
+    assert "被申请人" in reqs[0]["intro"]  # 不误伤
+    # 单申请人:不加编号(回归)
+    single = build_payload(CASE, SPEC, CATALOG)["arb_requests"][0]
+    assert "申请人1" not in single["intro"]
+
+
+def test_build_payload_multi_respondent_pluralize():
+    """多被申请人:支付类 intro 改"各被申请人共同"(样本 308623 工作人员手改习惯)。"""
+    case = {**CASE, "respondents": [CASE["respondents"][0], dict(CASE["respondents"][0], name="乙公司")]}
+    req = build_payload(case, SPEC, CATALOG)["arb_requests"][0]
+    assert req["intro"].startswith("请求裁决各被申请人共同向申请人支付")
+    # 单被申请人:不变(回归)
+    single = build_payload(CASE, SPEC, CATALOG)["arb_requests"][0]
+    assert "各被申请人共同" not in single["intro"]
+
+
+def test_compose_party_facts_legacy_narrative_no_fabrication():
+    """纯旧数据(无结构化字段、facts 为整段叙述):不虚构"有签合同/有缴社保"与之矛盾。"""
+    from app.services.case_submit import compose_party_facts
+
+    legacy = {"name": "张三", "facts": "本人于2019年入职,被申请人一直未与本人签订书面劳动合同。"}
+    text = compose_party_facts(legacy)
+    assert "签订书面劳动合同,有为本人缴纳" not in text
+    assert text.startswith("本人于2019年入职")
+    # 有结构化字段的新数据:正常四段式
+    structured = {"entry_date": "2020-01-01", "is_sign_labor_contract": 0, "facts": None}
+    assert "没有与本人签订书面劳动合同" in compose_party_facts(structured)
+
+
+def test_compose_party_facts_tail_without_entry_date():
+    """没填入职时间但填了地点/岗位/工资:片段保留,不静默丢弃。"""
+    from app.services.case_submit import compose_party_facts
+
+    text = compose_party_facts(
+        {"work_place": "某工厂", "position": "电工", "monthly_wage": "5000"}
+    )
+    assert "实际工作地点某工厂，工作岗位为电工，月工资标准为5000元。" in text

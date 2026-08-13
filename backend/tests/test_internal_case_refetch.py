@@ -270,3 +270,21 @@ async def test_case_no_not_found_falls_to_date_probe():
     assert deleted == ["502"]
     assert any("case_no" in p for _, p in client.calls)  # 先试了案号
     assert any("application_date" in p for _, p in client.calls)  # 再退到日期探测
+
+
+def test_map_record_accepts_string_stage():
+    """回归:快照列 stage 是 String,读回为 str;_map_record 必须能处理,
+    否则补拉(在办→结案翻转)时 current_step/end_way 静默变 None(2026-08-12 全量校验发现)。"""
+    from app.services.internal_case_sync import _map_record
+
+    raw = {
+        "case_id": 1,
+        "case_no": "明永劳人仲案字[2026]213号",
+        "current_step": "已结案",
+        "end_way": "调解",
+        "end_at": "2026-08-12",
+    }
+    by_enum = _map_record(InternalStage.HANDLE, raw)
+    by_str = _map_record("handle", raw)  # type: ignore[arg-type] 快照读回即字符串
+    assert by_str["current_step"] == by_enum["current_step"] == "已结案"
+    assert by_str["end_way"] == by_enum["end_way"] == "调解"

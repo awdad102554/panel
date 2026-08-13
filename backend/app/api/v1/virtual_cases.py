@@ -27,6 +27,7 @@ from app.models.user import User
 from app.services.application_doc import generate_application
 from app.services.case_submit import (
     DuplicateCaseWarning,
+    MAIN_CAUSE_PRESETS,
     SubmitSpec,
     _fill_company_info,
     build_draft,
@@ -119,7 +120,11 @@ class PartyIn(BaseModel):
     claims: str | None = None  # 旧版单一仲裁请求文本(兼容);新表单用 requests
     requests: list[str] = []  # 仲裁请求列表(申请人,每人可多条,可增删行)
     request_specs: list[RequestSpecIn | None] = []  # 与 requests 对齐的结构化数据(旧数据为空)
-    facts: str | None = None  # 事实与理由(申请人,每人一条)
+    # 事实理由结构化要素(申请人;提交内网/申请书按 compose_party_facts 逐人拼接):
+    is_sign_labor_contract: int | None = None  # 签订劳动合同 1/0(None=未填,默认按"有")
+    is_pay_social_insurance: int | None = None  # 缴纳社保 1/0(同上)
+    main_causes: list[str] = []  # 最主要原因(预设文本/自定义,进"因…"段)
+    facts: str | None = None  # 补充事实(选填,拼在合同社保段后;旧数据是整段叙述)
     legal_person: str | None = None  # 法定代表人(公司)
     legal_title: str | None = None  # 职务(公司)
     agents: list[AgentIn] = []  # 代理人(可多个)
@@ -491,7 +496,7 @@ async def submit_to_internal(
             if row is None:
                 raise HTTPException(status_code=404, detail="预登记案件不存在")
             if row.status == "recorded":
-                raise HTTPException(status_code=409, detail="该案件已录入内网,请勿重复提交")
+                raise HTTPException(status_code=409, detail="该案件已录入内网,请勿重复保存")
             case = _row_to_case_dict(row)
             receipt_number = row.receipt_number
         try:
@@ -510,7 +515,7 @@ async def submit_to_internal(
                 or "retry_failed" in message
                 or "receive/add http_5" in message
             ):
-                message = "内网响应异常,提交结果未知——请先到内网收件列表核实是否已生成,避免重复提交"
+                message = "内网响应异常,保存结果未知——请先到内网收件列表核实是否已生成,避免重复保存"
             raise HTTPException(status_code=502, detail=message) from exc
 
         warning = None
@@ -518,7 +523,7 @@ async def submit_to_internal(
             async with VirtualSessionLocal() as db:
                 row = await db.get(VirtualCase, case_id)
                 row.status = "recorded"
-                row.note = (row.note or "") + f" [已提交内网收件 {datetime.now():%Y-%m-%d %H:%M}]"
+                row.note = (row.note or "") + f" [已保存到内网收件 {datetime.now():%Y-%m-%d %H:%M}]"
                 await db.commit()
         except Exception:
             logger.exception("内网已建案但预登记状态更新失败[%s]: %s", receipt_number, data)
@@ -530,12 +535,13 @@ async def submit_to_internal(
 async def request_catalog_endpoint(
     _current_user: User = Depends(get_current_user),
 ) -> dict:
-    """仲裁请求类型目录(三级路径+第四级选项+表述模板),供预登记表单结构化录入请求。"""
+    """仲裁请求类型目录(三级路径+第四级选项+表述模板)+主因预设,供预登记表单结构化录入。"""
     try:
-        return {"code": 200, "data": await get_request_catalog()}
+        catalog = await get_request_catalog()
     except CaseSystemError as exc:
         logger.warning("请求类型目录拉取失败: %s", exc)
         raise HTTPException(status_code=502, detail="内网字典服务不可用,请稍后重试") from exc
+    return {"code": 200, "data": {"catalog": catalog, "main_cause_presets": MAIN_CAUSE_PRESETS}}
 
 
 @router.get("/lookup/person")

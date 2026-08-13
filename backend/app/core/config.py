@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -6,7 +7,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     """全局配置，值来自环境变量或 backend/.env（见 .env.example）。"""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # env_file 用绝对路径:相对路径依赖 cwd,从非 backend 目录启动会静默跳过
+    # .env 回落到默认值,无任何告警(2026-08-12 终审发现)。
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).resolve().parents[2] / ".env"), extra="ignore"
+    )
 
     app_name: str = "智能办案平台"
     api_prefix: str = "/api/v1"
@@ -17,18 +22,28 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 12
 
-    cors_origins: list[str] = ["http://localhost:5173"]
+    # 逗号分隔或 JSON 数组都接受;用 str 存储避开 pydantic-settings 对 list 字段
+    # 只认 JSON 的启动炸弹(运维写逗号分隔会导致服务起不来)。
+    cors_origins: str = "http://localhost:5173"
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        v = self.cors_origins.strip()
+        if not v:
+            return []
+        if v.startswith("["):
+            import json
+
+            return [str(s) for s in json.loads(v)]
+        return [s.strip() for s in v.split(",") if s.strip()]
 
     # 内网案件系统(10.96.10.78:8080)——数据源与 InfoWeb 同一套账号/登录流程。
-    # 默认值取 InfoWeb modules/config.py 现用值,可被 backend/.env 覆盖。
+    # 敏感默认值不入库(仓库在 GitHub):口令必须由 backend/.env 提供,缺失时
+    # 客户端首次使用报配置错误,而不是静默用仓库里的值(2026-08-12 终审)。
     case_system_enabled: bool = True
     case_system_base_url: str = "http://10.96.10.78:8080"
     case_system_username: str = "huhailiang"
-    case_system_password: str = (
-        "eyJpdiI6IjFDalU2azNBY1UrVkhUazBad0ZpY3c9PSIsInZhbHVlIjoiNE16d1NHXC9ISkV0"
-        "Z1ZnalFNSUZldU9hUDMwYTNNaGxhMldRU09Ic0FkeFU9IiwibWFjIjoiM2MyZjVhYWRkNjli"
-        "NThhMjc4YjE2MThiMmU1NmNjMzIxYjAyMTkxM2IzZjVjN2MyNjFlNzliYTQ1NjQ5MTM3ZSJ9"
-    )
+    case_system_password: str = ""
     case_system_timeout: int = 30
     case_system_session_hours: int = 10
 

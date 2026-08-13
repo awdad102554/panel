@@ -51,6 +51,8 @@ interface RequestRow {
   start_at: string | null; // 期间起(模板含"开始日期"时显示)
   end_at: string | null; // 期间止
   other: string; // $other 模板(其他类请求)的具体内容
+  applicant_index: number; // 归属第几个申请人(多申请人时后端给 intro 加"申请人N")
+  applicant_name: string; // 归属申请人姓名(卡片展示)
   intro: string | null;
   // intro 为草稿自动预填(用户在预登记改过的文本):改类型/金额/期间时若未手动
   // 编辑过 intro,要清掉让模板按新值重生成,否则旧表述随新数据进内网。
@@ -93,8 +95,12 @@ watch(
         is_three_woman_worker: d.defaults.is_three_woman_worker,
         fact_content: d.fact_content,
       };
-      mainCauseSelected.value = [];
-      mainCauseOther.value = "";
+      // 主因预填第一申请人存的值(预设进多选,自定义进"其他"输入框)
+      const storedCauses = d.fact_parties[0]?.main_causes ?? [];
+      mainCauseSelected.value = storedCauses.filter((c) => d.meta.main_cause_presets.includes(c));
+      mainCauseOther.value = storedCauses
+        .filter((c) => !d.meta.main_cause_presets.includes(c))
+        .join("；");
       requestRows.value = d.requests.map((r) => ({
         text: r.text,
         path: r.path_ids ? [...r.path_ids] : [],
@@ -105,6 +111,8 @@ watch(
         start_at: r.start_at ?? null,
         end_at: r.end_at ?? null,
         other: r.other ?? "",
+        applicant_index: r.applicant_index ?? 0,
+        applicant_name: r.applicant_name ?? "",
         intro: r.intro,
         introAuto: !!r.intro,
         guessed: r.guessed,
@@ -158,7 +166,7 @@ function itemsSum(row: RequestRow): number | null {
   return row.items.reduce((acc, i) => acc + (i.object ?? 0), 0);
 }
 
-function onPathChange(row: RequestRow, idx: number) {
+function onPathChange(row: RequestRow) {
   // 换了类型后,原第四级选项/金额/期间/请求表述大概率不再适用,清空重选
   // (陈旧金额或旧类型的 intro 随新类型提交会产生错误数据)。
   const item = catalogItemOf(row.path);
@@ -172,10 +180,15 @@ function onPathChange(row: RequestRow, idx: number) {
   row.other = "";
   row.intro = null;
   row.introAuto = false;
-  // 与内网一致的规律:案由跟随第一条请求的第二层类型自动选择(仍可手动改)。
-  const l2name = item?.path[1]?.name;
-  if (idx === 0 && l2name && (draft.value?.meta.case_reasons ?? []).includes(l2name)) {
-    form.value.case_reason = l2name;
+  // 与内网一致的规律:案由=数组中最后一条有效请求的第二层类型(内网服务端
+  // 按末请求定案由,2026-08-12 多类型案件实测);仍可手动改。
+  const reasons = draft.value?.meta.case_reasons ?? [];
+  const lastReason = [...requestRows.value]
+    .reverse()
+    .map((r) => catalogItemOf(r.path)?.path[1]?.name)
+    .find((n): n is string => !!n && reasons.includes(n));
+  if (lastReason) {
+    form.value.case_reason = lastReason;
   }
 }
 
@@ -231,6 +244,7 @@ function buildSpec(): SubmitSpec {
       return {
         text: r.text,
         path_ids: r.path,
+        applicant_index: r.applicant_index,
         option: multi ? null : r.option || null,
         object: multi ? itemsSum(r) : r.object ?? null,
         items: multi ? r.items : [],
@@ -244,38 +258,68 @@ function buildSpec(): SubmitSpec {
   };
 }
 
-// 事实理由自动生成(与后端 compose_facts 同模板,内网"自动生成"按钮的复刻)。
+// 事实理由自动生成(与后端 compose_case_facts 同规则:逐申请人四段式拼接,
+// 内网审核通过案件的样本总结;主因以勾选区为准——已预填存量值,改了勾选重新生成即生效)。
 function composeFacts() {
-  const parts = draft.value?.fact_parts;
-  if (!parts) return;
-  const fmtAmount = (v: string | null) => {
-    const n = parseFloat(String(v ?? "").replace(/,/g, ""));
-    return Number.isFinite(n) ? String(n) : null;
-  };
-  const segs: string[] = [];
-  if (parts.entry_date) {
-    // 月日零填充(与后端 compose_facts/内网 moment YYYY年MM月DD日 一致)。
-    const [y, m, d] = parts.entry_date.slice(0, 10).split("-");
-    let seg = `本人于${y}年${m}月${d}日入职被申请人处`;
-    const tail: string[] = [];
-    if (parts.work_place) tail.push(`实际工作地点${parts.work_place}`);
-    if (parts.position) tail.push(`工作岗位为${parts.position}`);
-    const wage = fmtAmount(parts.monthly_wage);
-    if (wage) tail.push(`月工资标准为${wage}元`);
-    if (tail.length) seg += ", " + tail.join("，");
-    segs.push(seg + "。");
-  }
-  const sign = form.value.is_sign_labor_contract === 1 ? "有" : "没有";
-  const ins = form.value.is_pay_social_insurance === 1 ? "有" : "没有";
-  let seg2 = `本人入职后，被申请人${sign}与本人签订书面劳动合同,${ins}为本人缴纳社会保险费`;
-  const causes = [
+  const parties = draft.value?.fact_parties ?? [];
+  if (!parties.length) return;
+  const caseCauses = [
     ...mainCauseSelected.value,
     ...(mainCauseOther.value.trim() ? [mainCauseOther.value.trim()] : []),
-  ];
-  seg2 += causes.length ? `;因${causes.join("，")}。` : "。";
-  segs.push(seg2);
-  segs.push("为维护本人合法权益，特提出申请，望裁如所请。");
-  form.value.fact_content = segs.join("");
+  ]
+    .map((c) => c.trim())
+    .filter(Boolean);
+  const total = parties.length;
+  const paras = parties.map((p, i) => {
+    const subj = total <= 1 ? "本人" : `申请人${i + 1}`;
+    const facts = (p.facts ?? "").trim().replace(/。+$/, "");
+    const causes = (i === 0 ? caseCauses : (p.main_causes ?? []))
+      .map((c) => c.trim())
+      .filter(Boolean);
+    // 严格校验,与后端 _to_date_str/_to_float 口径一致(脏数据不生成怪文本)
+    const entry = /^\d{4}-\d{2}-\d{2}$/.test(p.entry_date ?? "") ? p.entry_date! : null;
+    const wageRaw = String(p.monthly_wage ?? "").replace(/,/g, "");
+    const wage =
+      /^\d+(\.\d+)?$/.test(wageRaw) && parseFloat(wageRaw) ? wageRaw.replace(/\.?0+$/, "") : null;
+    // 纯旧数据(无结构化字段、facts 为整段叙述):直接用叙述原文,不虚构合同社保表述
+    const structured = !!(
+      entry ||
+      p.work_place ||
+      p.position ||
+      wage ||
+      p.is_sign_labor_contract != null ||
+      p.is_pay_social_insurance != null
+    );
+    if (!structured && facts) {
+      return facts + "。" + (causes.length ? `因${causes.join("，")}。` : "");
+    }
+    let out = "";
+    const tail: string[] = [];
+    if (p.work_place) tail.push(`实际工作地点${p.work_place}`);
+    if (p.position) tail.push(`工作岗位为${p.position}`);
+    if (wage) tail.push(`月工资标准为${wage}元`);
+    if (entry) {
+      const [y, m, d] = entry.split("-");
+      out += `${subj}于${y}年${m}月${d}日入职被申请人处`;
+      if (tail.length) out += ", " + tail.join("，");
+      out += "。";
+    } else if (tail.length) {
+      // 没填入职时间但填了地点/岗位/工资:片段不丢
+      out += tail.join("，") + "。";
+    }
+    const signVal = p.is_sign_labor_contract ?? form.value.is_sign_labor_contract;
+    const insVal = p.is_pay_social_insurance ?? form.value.is_pay_social_insurance;
+    const sign = signVal === 0 ? "没有" : "有";
+    const ins = insVal === 0 ? "没有" : "有";
+    // 合同社保段沿用"本人"(段落开头已点明申请人N,再用编号读三遍佶屈)
+    out += `本人入职后，被申请人${sign}与本人签订书面劳动合同,${ins}为本人缴纳社会保险费`;
+    if (facts) out += `;${facts}。`;
+    if (causes.length) out += `${facts ? "因" : ";因"}${causes.join("，")}。`;
+    if (!facts && !causes.length) out += "。";
+    return out;
+  });
+  const ending = "为维护本人合法权益，特提出申请，望裁如所请。";
+  form.value.fact_content = total <= 1 ? paras[0] + ending : [...paras, ending].join("\n");
 }
 
 async function openPreview() {
@@ -296,9 +340,9 @@ async function doSubmit() {
   try {
     try {
       await ElMessageBox.confirm(
-        `确认将 ${props.receiptNumber} 提交到内网收件?提交后内网将生成正式收件记录。`,
-        "提交确认",
-        { type: "warning", confirmButtonText: "确认提交", cancelButtonText: "再检查一下" },
+        `确认将 ${props.receiptNumber} 保存到内网收件?保存后内网将生成正式收件记录。`,
+        "保存确认",
+        { type: "warning", confirmButtonText: "确认保存", cancelButtonText: "再检查一下" },
       );
     } catch {
       return;
@@ -318,7 +362,7 @@ async function submitWithSpec(spec: SubmitSpec) {
     if (res.warning) {
       ElMessage.warning(res.warning);
     } else {
-      ElMessage.success(`${props.receiptNumber} 已提交到内网收件`);
+      ElMessage.success(`${props.receiptNumber} 已保存到内网收件`);
     }
     emit("update:visible", false);
     emit("submitted");
@@ -329,7 +373,7 @@ async function submitWithSpec(spec: SubmitSpec) {
       try {
         await ElMessageBox.confirm(resp.data.detail, "内网提示", {
           type: "warning",
-          confirmButtonText: "仍要提交",
+          confirmButtonText: "仍要保存",
           cancelButtonText: "取消",
         });
       } catch {
@@ -338,7 +382,7 @@ async function submitWithSpec(spec: SubmitSpec) {
       await submitWithSpec({ ...spec, force: true });
       return;
     }
-    ElMessage.error(resp?.data?.detail ?? "提交失败,请稍后重试");
+    ElMessage.error(resp?.data?.detail ?? "保存失败,请稍后重试");
   } finally {
     submitting.value = false;
   }
@@ -352,12 +396,17 @@ const companyFillText = computed(() => {
     .map((f) => `${f.name}${f.registered_capital ? `(注册资本 ${f.registered_capital} 万元)` : ""}`)
     .join("、");
 });
+
+// 多申请人时请求卡片标注归属申请人(intro 会带"申请人N",卡片给人看姓名更直观)。
+const hasMultiApplicants = computed(
+  () => new Set(requestRows.value.map((r) => r.applicant_index)).size > 1,
+);
 </script>
 
 <template>
   <el-dialog
     :model-value="visible"
-    title="提交到内网收件"
+    title="保存到内网收件"
     width="980px"
     top="3vh"
     @update:model-value="emit('update:visible', $event)"
@@ -365,7 +414,7 @@ const companyFillText = computed(() => {
     <div v-loading="loading" class="submit-body">
       <template v-if="draft">
         <el-alert v-if="draft.errors.length" type="error" :closable="false" class="mb">
-          <div v-for="(e, i) in draft.errors" :key="i">✕ {{ e }}(请返回编辑补齐后再提交)</div>
+          <div v-for="(e, i) in draft.errors" :key="i">✕ {{ e }}(请返回编辑补齐后再保存)</div>
         </el-alert>
         <el-alert v-if="draft.warnings.length" type="warning" :closable="false" class="mb">
           <div v-for="(w, i) in draft.warnings" :key="i">⚠ {{ w }}</div>
@@ -464,6 +513,9 @@ const companyFillText = computed(() => {
         <div class="section-title">仲裁请求(自动匹配的类型请逐条确认)</div>
         <div v-for="(r, idx) in requestRows" :key="idx" class="request-card">
           <div class="request-text">
+            <el-tag v-if="hasMultiApplicants" size="small" type="info" effect="plain">
+              {{ r.applicant_name || `申请人${r.applicant_index + 1}` }}
+            </el-tag>
             <el-tag v-if="r.guessed" size="small" type="success" effect="plain">已自动匹配</el-tag>
             <el-tag v-else size="small" type="warning" effect="plain">需人工选择</el-tag>
             {{ r.text }}
@@ -474,7 +526,7 @@ const companyFillText = computed(() => {
               :options="cascaderOptions"
               placeholder="请求类型(确认劳动关系等为两级)"
               style="width: 340px"
-              @change="onPathChange(r, idx)"
+              @change="onPathChange(r)"
             />
             <template v-if="isMulti(r)">
               <el-select
@@ -586,8 +638,8 @@ const companyFillText = computed(() => {
         </div>
 
         <p class="hint">
-          区域固定为 福建省 / 三明市 / 永安市;证据材料暂不随提交上传,可在内网补充。
-          提交前可点"预览请求体"核对最终发往内网的数据。
+          区域固定为 福建省 / 三明市 / 永安市;证据材料暂不随保存上传,可在内网补充。
+          保存前可点"预览请求体"核对最终发往内网的数据。
         </p>
       </template>
     </div>
@@ -596,7 +648,7 @@ const companyFillText = computed(() => {
       <el-button @click="emit('update:visible', false)">取消</el-button>
       <el-button :disabled="!canSubmit" @click="openPreview">预览请求体</el-button>
       <el-button type="primary" :loading="submitting" :disabled="!canSubmit || submitting" @click="doSubmit">
-        确认提交
+        确认保存
       </el-button>
     </template>
 

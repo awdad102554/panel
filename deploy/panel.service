@@ -9,7 +9,8 @@ WorkingDirectory=/vol2/1000/python-project/panel/backend
 Environment="PATH=/vol2/1000/python-project/panel/backend/venv/bin"
 # 配置读取 WorkingDirectory 下的 .env(见 .env.example)。
 # 注意:必须用单进程。app 内含 lifespan 后台同步循环,多 worker 会导致同步任务并发重复执行。
-ExecStart=/vol2/1000/python-project/panel/backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 6543
+# 仅监听本机回源:nginx 反代 127.0.0.1:6543,6543 不对外直连(2026-08-12 安全终审)。
+ExecStart=/vol2/1000/python-project/panel/backend/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 6543
 Restart=always
 RestartSec=5
 

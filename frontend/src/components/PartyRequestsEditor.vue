@@ -8,10 +8,12 @@ import type { CatalogItem } from "@/api/virtualCases";
 import {
   buildCascaderOptions,
   catalogItemOf,
+  disambiguateApplicant,
   fillRequestTemplate,
   isMultiTemplate,
   needsDatesTemplate,
   needsOtherTemplate,
+  pluralizeRespondent,
 } from "@/utils/requestCatalog";
 
 export interface ReqRow {
@@ -31,9 +33,20 @@ export interface ReqRow {
 const props = defineProps<{
   rows: ReqRow[];
   catalog: CatalogItem[];
+  applicantSeq?: number; // 当前申请人在表单里的序号(1 起)
+  applicantCount?: number; // 申请人总数;>1 时生成文本带"申请人N"
+  respondentCount?: number; // 被申请人总数;>1 时支付类表述带"各被申请人共同"
 }>();
 
 const cascaderOptions = computed(() => buildCascaderOptions(props.catalog));
+
+/** 多申请人加"申请人N"编号、多被申请人支付表述改"各被申请人共同"(内网手改习惯)。 */
+function mark(text: string): string {
+  let out = text;
+  if ((props.applicantCount ?? 1) > 1) out = disambiguateApplicant(out, props.applicantSeq ?? 1);
+  if ((props.respondentCount ?? 1) > 1) out = pluralizeRespondent(out);
+  return out;
+}
 
 function itemOf(row: ReqRow): CatalogItem | undefined {
   return catalogItemOf(props.catalog, row.path);
@@ -61,7 +74,7 @@ function regen(row: ReqRow) {
   const item = itemOf(row);
   if (!item) return;
   const text = fillRequestTemplate(item, row);
-  if (text) row.text = text;
+  if (text) row.text = mark(text);
 }
 
 /** 手动"自动生成":强制按模板复位文本,并解除编辑锁定。 */
@@ -70,7 +83,7 @@ function forceRegen(row: ReqRow) {
   const item = itemOf(row);
   if (!item) return;
   const text = fillRequestTemplate(item, row);
-  if (text) row.text = text;
+  if (text) row.text = mark(text);
 }
 
 function onPathChange(row: ReqRow) {

@@ -89,3 +89,19 @@ def test_claims_fallback_for_legacy_data():
     assert "请求支付拖欠工资2万元" in build_requests_text(applicants)
     # 正则支持"万元":20000 + 1000
     assert build_total_amount(applicants) == "以上共计21000.00元。"
+
+
+def test_requests_text_multi_applicant_marked():
+    """多申请人:申请书请求段按归属加"申请人N";单申请人保持原样。"""
+    from app.services.application_doc import build_requests_text
+
+    multi = [
+        {"name": "张三", "requests": ["请求裁决被申请人向申请人支付工资5000元。"]},
+        {"name": "李四", "requests": ["请求裁决被申请人向申请人支付工资4000元。"]},
+    ]
+    text = build_requests_text(multi)
+    assert "1.请求裁决被申请人向申请人1支付工资5000元。" in text
+    assert "2.请求裁决被申请人向申请人2支付工资4000元。" in text
+
+    single = [{"name": "张三", "requests": ["请求裁决被申请人向申请人支付工资5000元。"]}]
+    assert "申请人1" not in build_requests_text(single)

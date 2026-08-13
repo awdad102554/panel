@@ -185,6 +185,10 @@ async def _fetch_single_by_case_no(
     """
     if not case_no:
         return None
+    # stage 可能是快照读回的字符串(列是 String):_STAGE_PATHS 查表靠 str 枚举
+    # hash/eq 能命中,但下方错误分支的 stage.value 对纯 str 会 AttributeError
+    # 穿透 except CaseSystemError(与 _map_record 同根因,2026-08-12 终审发现)。
+    stage = InternalStage(stage)
     match = _CASE_NO_KEY_RE.search(case_no)
     if match is None:
         return None
@@ -271,6 +275,10 @@ def _phase_anchor_fallback(stage: InternalStage, raw: dict) -> datetime:
 
 def _map_record(stage: InternalStage, raw: dict) -> dict:
     """把内网原始记录映射成 InternalCaseTracking 字段(不含 phase_entered_at)。"""
+    # stage 可能是快照读回的字符串(列是 String,见 _refetch_disappeared 的 prev.stage);
+    # 下面用 is 判枚举单例,字符串会全部落空——结案/结案方式等字段静默变 None
+    # (2026-08-12 全量校验发现:在办→结案翻转经补拉后 raw 已新但列不更新)。
+    stage = InternalStage(stage)
     external_case_id = str(raw.get("case_id"))
     case_no = raw.get("case_no")
     current_step = None

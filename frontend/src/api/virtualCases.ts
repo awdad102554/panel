@@ -54,6 +54,13 @@ export interface Party {
   claims: string | null;
   requests: string[];
   request_specs?: (RequestSpecData | null)[];
+  /** 签订劳动合同 1/0(null=未填,按"有"处理) */
+  is_sign_labor_contract?: number | null;
+  /** 缴纳社保 1/0(同上) */
+  is_pay_social_insurance?: number | null;
+  /** 最主要原因(预设文本/自定义,进事实理由"因…"段) */
+  main_causes?: string[];
+  /** 补充事实(选填,拼在合同社保段后) */
   facts: string | null;
   legal_person: string | null;
   legal_title: string | null;
@@ -187,6 +194,9 @@ export interface SubmitDraftRequest {
   other?: string | null;
   intro: string | null;
   guessed: boolean;
+  /** 该请求归属的申请人(多申请人时提交组装给 intro 加"申请人N") */
+  applicant_index?: number;
+  applicant_name?: string;
 }
 
 export interface SubmitDraft {
@@ -207,12 +217,18 @@ export interface SubmitDraft {
   respondents: Party[];
   company_fills: { name: string; found: boolean; registered_capital?: string | number }[];
   fact_content: string;
-  fact_parts: {
+  /** 逐申请人事实要素(对话框"自动生成"按此重拼,与后端 compose_case_facts 同规则) */
+  fact_parties: {
+    name: string | null;
     entry_date: string | null;
     work_place: string | null;
     position: string | null;
     monthly_wage: string | null;
-  };
+    is_sign_labor_contract: number | null;
+    is_pay_social_insurance: number | null;
+    main_causes: string[];
+    facts: string | null;
+  }[];
   errors: string[];
   warnings: string[];
   meta: {
@@ -232,6 +248,7 @@ export interface SubmitDraft {
 export interface RequestSpec {
   text: string;
   path_ids: number[];
+  applicant_index: number;
   option: string | null;
   object: number | null;
   items: RequestItem[];
@@ -275,9 +292,14 @@ export function submitToInternal(id: string, spec: SubmitSpec) {
     .then((res) => res.data);
 }
 
-/** 仲裁请求类型目录(三级路径+第四级选项+表述模板),供预登记表单结构化录入请求。 */
+/** 仲裁请求类型目录(三级路径+第四级选项+表述模板)+主因预设,供预登记表单结构化录入。 */
 export function fetchRequestCatalog() {
   return apiClient
-    .get<{ data?: CatalogItem[] }>("/virtual-cases/meta/request-catalog")
-    .then((res) => res.data?.data ?? []);
+    .get<{ data?: { catalog?: CatalogItem[]; main_cause_presets?: string[] } }>(
+      "/virtual-cases/meta/request-catalog",
+    )
+    .then((res) => ({
+      catalog: res.data?.data?.catalog ?? [],
+      main_cause_presets: res.data?.data?.main_cause_presets ?? [],
+    }));
 }

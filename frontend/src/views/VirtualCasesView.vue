@@ -7,23 +7,26 @@ import type { CatalogItem, Evidence, Party, VirtualCase } from "@/api/virtualCas
 import PartyAgentsEditor from "@/components/PartyAgentsEditor.vue";
 import PartyRequestsEditor, { type ReqRow } from "@/components/PartyRequestsEditor.vue";
 import VirtualCaseSubmitDialog from "@/components/VirtualCaseSubmitDialog.vue";
-import { catalogItemOf, isMultiTemplate } from "@/utils/requestCatalog";
+import { catalogItemOf, disambiguateApplicant, isMultiTemplate, pluralizeRespondent } from "@/utils/requestCatalog";
 
 // 表单里的当事人:在 Party 基础上带请求编辑器的行状态(保存时拆开,不入库)。
-type PartyForm = Party & { reqRows?: ReqRow[] };
+type PartyForm = Party & { reqRows?: ReqRow[]; causeOther?: string };
 
 const cases = ref<VirtualCase[]>([]);
 const loading = ref(false);
 
-// 请求类型目录(内网字典):打开新建/编辑对话框时拉一次,失败降级为自由文本录入。
+// 请求类型目录(内网字典)+主因预设:打开新建/编辑对话框时拉一次,失败降级为自由文本录入。
 const catalog = ref<CatalogItem[]>([]);
+const mainCausePresets = ref<string[]>([]);
 let catalogLoading = false;
 
 async function ensureCatalog() {
   if (catalog.value.length || catalogLoading) return;
   catalogLoading = true;
   try {
-    catalog.value = await api.fetchRequestCatalog();
+    const meta = await api.fetchRequestCatalog();
+    catalog.value = meta.catalog;
+    mainCausePresets.value = meta.main_cause_presets;
   } catch {
     ElMessage.warning("请求类型目录加载失败,可先用自定义文本填写请求");
   } finally {
@@ -65,6 +68,9 @@ function emptyApplicant(): PartyForm {
     claims: null,
     requests: [],
     reqRows: [],
+    is_sign_labor_contract: 1,
+    is_pay_social_insurance: 1,
+    main_causes: [],
     facts: null,
     legal_person: null,
     legal_title: null,
@@ -128,13 +134,24 @@ function buildReqRows(p: Party): ReqRow[] {
 function openEdit(row: VirtualCase) {
   editingId.value = row.id;
   form.value = { note: row.note ?? "" };
-  applicants.value = row.applicants.map((p) => ({
-    ...emptyApplicant(),
-    ...p,
-    requests: p.requests?.length ? [...p.requests] : [],
-    reqRows: buildReqRows(p),
-    agents: (p.agents ?? []).map((a) => ({ ...a })),
-  }));
+  applicants.value = row.applicants.map((p) => {
+    // 自定义主因(不在预设里的)归入"其他主因"输入框;预设未加载时全部留在多选里。
+    const causes = p.main_causes ?? [];
+    const customs = mainCausePresets.value.length
+      ? causes.filter((x) => !mainCausePresets.value.includes(x))
+      : [];
+    return {
+      ...emptyApplicant(),
+      ...p,
+      main_causes: mainCausePresets.value.length
+        ? causes.filter((x) => mainCausePresets.value.includes(x))
+        : [...causes],
+      causeOther: customs.join("；"),
+      requests: p.requests?.length ? [...p.requests] : [],
+      reqRows: buildReqRows(p),
+      agents: (p.agents ?? []).map((a) => ({ ...a })),
+    };
+  });
   respondents.value = row.respondents.map((p) => ({
     ...emptyRespondent(),
     ...p,
@@ -234,14 +251,31 @@ async function save() {
   await ensureCatalog();
   saving.value = true;
   try {
-    const applicantsClean = applicants.value.map((p) => {
-      const { reqRows, ...rest } = p;
+    const applicantsClean = applicants.value.map((p, ai) => {
+      const { reqRows, causeOther, ...rest } = p;
       const rows = (reqRows ?? []).filter((r) => r.text.trim());
+      // 多申请人:文本里泛指的"申请人"统一加编号(申请人N),提交内网/申请书同一口径;
+      // 多被申请人:支付类表述改"各被申请人共同"。两个规则都幂等,编辑器已处理的不重复加。
+      const multi = applicants.value.length > 1;
+      const pluralResp = respondents.value.length > 1;
       return {
         ...rest,
         name: p.name.trim(),
         claims: null, // claims 已迁移进 requests(buildReqRows),清掉避免数据重复残留
-        requests: rows.map((r) => r.text.trim()),
+        // 预设多选 + 其他自定义合并入库(后端按内网结构区分预设/[None,自定义])
+        main_causes: [
+          ...(p.main_causes ?? []),
+          ...(causeOther?.trim() ? [causeOther.trim()] : []),
+        ],
+        requests: rows.map((r) => {
+          let t = r.text.trim();
+          // 先剥离旧的"申请人N"编号再按当前位置重标:删除/换序申请人后不留陈旧编号
+          // (\d{1,2}(?!\d) 限定编号位数,不误伤"申请人2025年…"这类叙述)。
+          t = t.replace(/(^|[^被])申请人\d{1,2}(?!\d)/g, "$1申请人");
+          if (multi) t = disambiguateApplicant(t, ai + 1);
+          if (pluralResp) t = pluralizeRespondent(t);
+          return t;
+        }),
         // 与 requests 按索引对齐的结构化数据:自由文本行/未选类型的行存 null。
         // 提交内网用它免猜类型,申请书合计金额取 object/items 不依赖文本正则。
         request_specs: rows.map((r) => {
@@ -282,10 +316,18 @@ async function save() {
         }),
       };
     });
-    // 被申请人卡片不展示请求行,清掉继承自申请人结构的空 requests,避免脏数据入库。
+    // 被申请人卡片不展示请求/事实要素,清掉继承自申请人结构的字段,避免脏数据入库。
     const respondentsClean = respondents.value.map((p) => {
-      const { reqRows, ...rest } = p;
-      return { ...rest, name: p.name.trim(), requests: [], request_specs: [] };
+      const { reqRows, causeOther, ...rest } = p;
+      return {
+        ...rest,
+        name: p.name.trim(),
+        requests: [],
+        request_specs: [],
+        is_sign_labor_contract: null,
+        is_pay_social_insurance: null,
+        main_causes: [],
+      };
     });
     const payload = {
       // 编辑表单没有案由字段:编辑时保留原值,不静默清掉。
@@ -410,7 +452,7 @@ onMounted(refresh);
       <h2>预登记案件</h2>
       <p class="hint">
         暂不录入内网系统的案件可在此预登记,记录案件信息与进度,数据仅保存在本系统的独立文件数据库(SQLite),不与内网同步。待录入的案件会计入案件总览的"待办案件"卡片,录入内网后点"标记已录入"退出待办。
-        当事人信息可通过身份证号/企业名称(或信用代码)调用内部接口查询自动填充。案件信息完整后可点"提交到内网"直接写入内网收件,无需在内网重复录入。
+        当事人信息可通过身份证号/企业名称(或信用代码)调用内部接口查询自动填充。案件信息完整后可点"保存到内网"直接写入内网收件,无需在内网重复录入。
       </p>
     </div>
 
@@ -447,7 +489,7 @@ onMounted(refresh);
             type="success"
             @click="openSubmit(row)"
           >
-            提交到内网
+            保存到内网
           </el-button>
           <el-button
             v-if="row.status === 'pending'"
@@ -545,16 +587,62 @@ onMounted(refresh);
                 <label>月工资(元)</label>
                 <el-input v-model="p.monthly_wage" placeholder="请输入数额,如:5000" />
               </div>
-              <div class="field span4">
-                <label>仲裁请求(选类型+金额自动生成文本,可编辑;申请书/提交内网按结构化数据提取)</label>
-                <PartyRequestsEditor :rows="p.reqRows!" :catalog="catalog" />
+              <div class="field">
+                <label>签订劳动合同</label>
+                <el-switch
+                  v-model="p.is_sign_labor_contract"
+                  :active-value="1"
+                  :inactive-value="0"
+                  active-text="是"
+                  inactive-text="否"
+                />
+              </div>
+              <div class="field">
+                <label>缴纳社保</label>
+                <el-switch
+                  v-model="p.is_pay_social_insurance"
+                  :active-value="1"
+                  :inactive-value="0"
+                  active-text="是"
+                  inactive-text="否"
+                />
               </div>
               <div class="field span4">
-                <label>事实与理由</label>
-                <el-input v-model="p.facts" type="textarea" :rows="3" placeholder="请简明扼要叙述仲裁请求的事实依据和法律理由,包括入职时间、工作地点、工资情况、争议经过等。" />
+                <label>仲裁请求(选类型+金额自动生成文本,可编辑;申请书/保存内网按结构化数据提取)</label>
+                <PartyRequestsEditor
+                  :rows="p.reqRows!"
+                  :catalog="catalog"
+                  :applicant-seq="idx + 1"
+                  :applicant-count="applicants.length"
+                  :respondent-count="respondents.length"
+                />
               </div>
               <div class="field span4">
-                <label>代理人(选填,提交内网时随当事人一并提交)</label>
+                <label>事实理由要素(与入职/地点/岗位/工资/合同/社保一起按内网规则自动拼接)</label>
+                <el-checkbox-group v-model="p.main_causes">
+                  <el-checkbox
+                    v-for="c in mainCausePresets"
+                    :key="c"
+                    :value="c"
+                    class="cause-checkbox"
+                  >
+                    {{ c }}
+                  </el-checkbox>
+                </el-checkbox-group>
+                <div class="cause-other">
+                  <span class="cause-other-label">其他主因</span>
+                  <el-input v-model="p.causeOther" placeholder="选填,自定义主要原因" />
+                </div>
+                <el-input
+                  v-model="p.facts"
+                  type="textarea"
+                  :rows="2"
+                  placeholder="补充事实(选填),如受伤/离职经过等;拼接在自动生成文本的合同社保段之后"
+                  style="margin-top: 6px"
+                />
+              </div>
+              <div class="field span4">
+                <label>代理人(选填,保存内网时随当事人一并保存)</label>
                 <PartyAgentsEditor v-model="p.agents" />
               </div>
             </div>
@@ -607,7 +695,7 @@ onMounted(refresh);
                 <el-input v-model="p.phone" placeholder="请输入用人单位联系电话" />
               </div>
               <div class="field span4">
-                <label>代理人(选填,提交内网时随当事人一并提交)</label>
+                <label>代理人(选填,保存内网时随当事人一并保存)</label>
                 <PartyAgentsEditor v-model="p.agents" />
               </div>
             </div>
@@ -719,5 +807,27 @@ onMounted(refresh);
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
+}
+
+.cause-checkbox {
+  display: flex;
+  margin-right: 0;
+  height: auto;
+  white-space: normal;
+  align-items: flex-start;
+  padding: 2px 0;
+}
+
+.cause-other {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.cause-other-label {
+  font-size: 13px;
+  color: var(--el-text-color-regular);
+  flex-shrink: 0;
 }
 </style>

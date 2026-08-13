@@ -76,6 +76,18 @@ export interface RequestRowData {
   other: string | null; // $other 模板(其他类请求)的具体内容
 }
 
+/** 多申请人案件:文本里泛指的"申请人"→"申请人N"(seq 从 1 起),
+ * 与后端 _disambiguate_applicant 同一规则;"被申请人"/已编号的不受影响。 */
+export function disambiguateApplicant(text: string, seq: number): string {
+  return text.replace(/(^|[^被])申请人(?!\d)/g, `$1申请人${seq}`);
+}
+
+/** 多被申请人案件:支付类表述"被申请人向申请人"→"各被申请人共同向申请人"
+ * (内网工作人员手改习惯,样本 308623;幂等)。 */
+export function pluralizeRespondent(text: string): string {
+  return text.split("被申请人向申请人").join("各被申请人共同向申请人");
+}
+
 /** 按内网模板生成请求表述;含无法填充的占位时返回 null(与后端 _fill_template 一致)。 */
 export function fillRequestTemplate(item: CatalogItem, row: RequestRowData): string | null {
   let out = item.template || "";

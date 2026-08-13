@@ -195,6 +195,7 @@ class RequestSpec(BaseModel):
 
     text: str  # 预登记原始自由文本(兜底 intro)
     path_ids: list[int]  # 类型树节点 id(三级;确认劳动关系等两级叶子为两级)
+    applicant_index: int = 0  # 该请求属于第几个申请人(多申请人时 intro 加"申请人N")
     option: str | None = None  # 第四级选项(无金额类请求可为空)
     object: float | None = Field(default=None, allow_inf_nan=False)  # 标的金额(确认劳动关系等无金额请求为空)
     items: list[RequestItem] = []  # 多选项明细(优先级高于 option)
@@ -233,45 +234,133 @@ class SubmitSpec(BaseModel):
     force: bool = False  # 内网提示疑似重复案件后,用户确认仍要提交时置 True(重试一次)
 
 
+def _disambiguate_applicant(text: str, seq: int) -> str:
+    """多申请人案件:把请求表述里泛指的"申请人"替换为"申请人N"(seq 从 1 起),
+    与工作人员手动加编号的习惯一致。"被申请人"和已编号的"申请人N"不受影响。
+    """
+    return re.sub(r"(?<!被)申请人(?!\d)", f"申请人{seq}", text)
+
+
+def _pluralize_respondent(text: str) -> str:
+    """多被申请人案件:支付类表述"被申请人向申请人"→"各被申请人共同向申请人"
+    (内网工作人员手改习惯,2026-08-13 样本 receive/308623)。幂等:替换后不再含原串。
+    """
+    return text.replace("被申请人向申请人", "各被申请人共同向申请人")
+
+
+def compose_party_facts(
+    p: dict,
+    seq: int = 1,
+    total: int = 1,
+    fallback_sign: int = 1,
+    fallback_ins: int = 1,
+) -> str:
+    """逐申请人事实理由段(2026-08-13 内网审核通过案件样本总结的四段式):
+    入职段(空/0 片段省略) + 合同社保段 + 补充事实(facts 字段) + 因主因段。
+    主体:单申请人"本人",多申请人"申请人N"。工作人员在此基础上手动润色。
+
+    p 的结构化字段:entry_date/work_place/position/monthly_wage(预登记既有)、
+    is_sign_labor_contract/is_pay_social_insurance(0=没有,None 时用兜底值)、
+    main_causes(主因列表)、facts(补充事实,拼在合同社保段后)。
+    fallback_sign/fallback_ins:案件级兜底(提交 spec 值/第一申请人值)。
+    纯旧数据(无任何结构化字段、facts 为整段叙述)直接用叙述原文,
+    不虚构"有签合同/有缴社保"与之矛盾(2026-08-13 一致性审查)。"""
+    subj = "本人" if total <= 1 else f"申请人{seq}"
+    facts = (p.get("facts") or "").strip().rstrip("。")
+    causes = "，".join(c.strip() for c in (p.get("main_causes") or []) if c and c.strip())
+    raw_sign = p.get("is_sign_labor_contract")
+    raw_ins = p.get("is_pay_social_insurance")
+    entry = _to_date_str(p.get("entry_date"))
+    wage = _to_float(p.get("monthly_wage"))
+    structured = any(
+        [
+            entry,
+            p.get("work_place"),
+            p.get("position"),
+            wage,
+            raw_sign is not None,
+            raw_ins is not None,
+        ]
+    )
+    if not structured and facts:
+        out = facts + "。"
+        if causes:
+            out += f"因{causes}。"
+        return out
+    out = ""
+    tail: list[str] = []
+    if p.get("work_place"):
+        tail.append(f"实际工作地点{p['work_place']}")
+    if p.get("position"):
+        tail.append(f"工作岗位为{p['position']}")
+    # 月工资为 0/空时省略工资片段(内网真实样本如此:"月工资标准为0元"不出现)。
+    if wage:
+        tail.append(f"月工资标准为{_fmt_amount(wage)}元")
+    if entry:
+        dt = datetime.strptime(entry, "%Y-%m-%d")
+        # 内网前端用 moment YYYY年MM月DD日(月日零填充,样例2/3 验证)。
+        seg = f"{subj}于{dt:%Y年%m月%d日}入职被申请人处"
+        if tail:
+            seg += ", " + "，".join(tail)
+        out += seg + "。"
+    elif tail:
+        # 没填入职时间但填了地点/岗位/工资:片段不丢(此前只在入职段内拼接,静默丢弃)。
+        out += "，".join(tail) + "。"
+    sign_v = raw_sign if raw_sign is not None else fallback_sign
+    ins_v = raw_ins if raw_ins is not None else fallback_ins
+    sign = "没有" if sign_v == 0 else "有"
+    ins = "没有" if ins_v == 0 else "有"
+    # 合同社保段沿用"本人":段落开头已点明申请人N,再用编号读三遍佶屈(内网样本也用本人)。
+    out += f"本人入职后，被申请人{sign}与本人签订书面劳动合同,{ins}为本人缴纳社会保险费"
+    if facts:
+        # 补充事实接在合同社保段后(样本:"…书面劳动合同;于2024年2月1日…被撞伤。")。
+        out += ";" + facts + "。"
+    if causes:
+        out += ("因" if facts else ";因") + causes + "。"
+    if not facts and not causes:
+        out += "。"
+    return out
+
+
+def compose_case_facts(
+    applicants: list[dict],
+    is_sign_labor_contract: int = 1,
+    is_pay_social_insurance: int = 1,
+    main_causes: list[str] | None = None,
+) -> str:
+    """一案完整事实理由:逐申请人分段拼接 + 固定结尾。
+
+    sign/ins 是案件级兜底(申请人未填时取用);案件级主因只并入第一申请人的
+    段落(多申请人逐字重复会失真),且该申请人自己有主因时不覆盖。"""
+    paras: list[str] = []
+    total = len(applicants)
+    for i, p in enumerate(applicants):
+        q = dict(p)
+        if not q.get("main_causes") and main_causes and i == 0:
+            q["main_causes"] = main_causes
+        paras.append(
+            compose_party_facts(q, i + 1, total, is_sign_labor_contract, is_pay_social_insurance)
+        )
+    ending = "为维护本人合法权益，特提出申请，望裁如所请。"
+    if total <= 1:
+        # 单申请人:一段到底,不换行(与内网 content 样例一致)。
+        return (paras[0] if paras else "") + ending
+    return "\n".join([*paras, ending])
+
+
 def compose_facts(
     first: dict,
     is_sign_labor_contract: int,
     is_pay_social_insurance: int,
     main_causes: list[str] | None = None,
 ) -> str:
-    """按内网"自动生成事实理由"的模板拼接(来自内网前端 getContent,样例2 验证)。
-
-    模板:本人于X年X月X日入职被申请人处, 实际工作地点…，工作岗位为…，月工资标准为…元。
-    本人入职后，被申请人{有/没有}与本人签订书面劳动合同,{有/没有}为本人缴纳社会保险费;
-    因{main_causes.join("，")}。为维护本人合法权益，特提出申请，望裁如所请。
-    缺字段的片段自动省略,不出现"None/空"字样。
-    """
-    parts: list[str] = []
-    entry = _to_date_str(first.get("entry_date"))
-    if entry:
-        dt = datetime.strptime(entry, "%Y-%m-%d")
-        # 内网前端用 moment YYYY年MM月DD日(月日零填充,样例2/3 验证)。
-        seg = f"本人于{dt:%Y年%m月%d日}入职被申请人处"
-        tail: list[str] = []
-        if first.get("work_place"):
-            tail.append(f"实际工作地点{first['work_place']}")
-        if first.get("position"):
-            tail.append(f"工作岗位为{first['position']}")
-        if _to_float(first.get("monthly_wage")) is not None:
-            tail.append(f"月工资标准为{_fmt_amount(_to_float(first['monthly_wage']))}元")
-        if tail:
-            seg += ", " + "，".join(tail)
-        parts.append(seg + "。")
-    sign = "有" if is_sign_labor_contract == 1 else "没有"
-    ins = "有" if is_pay_social_insurance == 1 else "没有"
-    parts.append(f"本人入职后，被申请人{sign}与本人签订书面劳动合同,{ins}为本人缴纳社会保险费")
-    cause = "，".join(c.strip() for c in (main_causes or []) if c and c.strip())
-    if cause:
-        parts[-1] += f";因{cause}。"
-    else:
-        parts[-1] += "。"
-    parts.append("为维护本人合法权益，特提出申请，望裁如所请。")
-    return "".join(parts)
+    """兼容包装:单申请人案件级参数 → compose_case_facts。"""
+    p = dict(first)
+    p["is_sign_labor_contract"] = is_sign_labor_contract
+    p["is_pay_social_insurance"] = is_pay_social_insurance
+    if main_causes:
+        p["main_causes"] = main_causes
+    return compose_case_facts([p])
 
 
 def _main_cause_array(main_causes: list[str]) -> list:
@@ -624,6 +713,13 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
             )
             or req.text
         )
+        # 多申请人:intro 里泛指的"申请人"加编号(申请人N),与工作人员手动习惯一致;
+        # 正则幂等,已带编号的文本(预登记表单生成)不会重复加。
+        if len(applicants) > 1 and intro:
+            intro = _disambiguate_applicant(intro, req.applicant_index + 1)
+        # 多被申请人:支付类表述改"各被申请人共同"(内网工作人员手改习惯,样本 308623)。
+        if len(respondents) > 1 and intro:
+            intro = _pluralize_respondent(intro)
         arb_req: dict = {
             "type": leaf["path"],
             "is_main_dispute": 0,
@@ -643,12 +739,9 @@ def build_payload(case: dict, spec: SubmitSpec, catalog: list[dict]) -> dict:
     first = applicants[0] if applicants else {}
     facts = (spec.fact_content or "").strip()
     if not facts:
-        facts = "；".join(
-            f.strip() for f in (p.get("facts") for p in applicants) if f and f.strip()
-        )
-    if not facts:
-        facts = compose_facts(
-            first, spec.is_sign_labor_contract, spec.is_pay_social_insurance, spec.main_causes
+        # 逐申请人结构化拼接(补充事实 facts 已内含于各段);案件级合同/社保/主因作兜底。
+        facts = compose_case_facts(
+            applicants, spec.is_sign_labor_contract, spec.is_pay_social_insurance, spec.main_causes
         )
     main_cause = _main_cause_array(spec.main_causes)
     return {
@@ -814,7 +907,7 @@ async def build_draft(case: dict) -> dict:
     respondents = [dict(p) for p in case.get("respondents") or []]
 
     requests_draft: list[dict] = []
-    for p in applicants:
+    for ai, p in enumerate(applicants):
         specs = p.get("request_specs") or []
         for i, text in enumerate(p.get("requests") or []):
             spec = specs[i] if i < len(specs) and isinstance(specs[i], dict) else None
@@ -837,6 +930,9 @@ async def build_draft(case: dict) -> dict:
                     # 存的类型已不在目录:标记,统一在 warnings 初始化后提示
                     "stale_spec": bool(spec),
                 }
+            # 请求归属的申请人(多申请人时提交组装给 intro 加"申请人N",对话框展示用)
+            entry["applicant_index"] = ai
+            entry["applicant_name"] = p.get("name") or ""
             requests_draft.append(entry)
     # 旧版单一 claims 兼容:没有 requests 时按一条自由文本请求处理。
     if not requests_draft and case.get("claims"):
@@ -853,6 +949,8 @@ async def build_draft(case: dict) -> dict:
                 "other": None,
                 "intro": None,
                 "guessed": False,
+                "applicant_index": 0,
+                "applicant_name": (applicants[0].get("name") if applicants else "") or "",
             }
         )
 
@@ -862,12 +960,25 @@ async def build_draft(case: dict) -> dict:
     merged = {**case, "applicants": applicants, "respondents": respondents}
     errors, warnings = validate_case(merged)
 
-    # 事实理由:预登记有 facts 用原文,否则按内网模板自动生成(对话框可改/重新生成)。
+    # 事实理由:逐申请人结构化拼接(补充事实 facts 内含于各段);对话框可改/重新生成。
+    # 案件级兜底值取第一申请人(与对话框重拼的 ?? form 值口径一致,缺省 1=有)。
     first = applicants[0] if applicants else {}
-    existing_facts = "；".join(
-        f.strip() for f in (p.get("facts") for p in applicants) if f and f.strip()
+    fact_content = compose_case_facts(
+        applicants,
+        first.get("is_sign_labor_contract") if first.get("is_sign_labor_contract") is not None else 1,
+        first.get("is_pay_social_insurance") if first.get("is_pay_social_insurance") is not None else 1,
     )
-    fact_content = existing_facts or compose_facts(first, 1, 1)
+    # 内网 fact_reason 的合同/社保是案件级单值;各申请人不一致时默认取第一申请人,
+    # 必须提示人工确认(拼接文本里每人的表述是对的,只有结构化字段装不下差异)。
+    for key, label in (
+        ("is_sign_labor_contract", "劳动合同签订情况"),
+        ("is_pay_social_insurance", "社保缴纳情况"),
+    ):
+        values = {p.get(key) for p in applicants if p.get(key) is not None}
+        if len(values) > 1:
+            warnings.append(
+                f"各申请人的{label}不一致,内网仅支持案件级单一字段,默认取第一申请人,请在下方开关确认"
+            )
     for r in requests_draft:
         if r.pop("stale_spec", False):
             warnings.append(f"已保存的请求类型在内网目录中不存在,请重新选择: {r['text'][:30]}")
@@ -875,15 +986,18 @@ async def build_draft(case: dict) -> dict:
         if not r["guessed"]:
             warnings.append(f"仲裁请求未能自动匹配类型,请人工选择: {r['text'][:30]}")
 
-    # 案由默认值:与内网一致的规律——跟随第一条请求的第二层类型自动选择
-    # (案由字典就是请求树第二层名称的集合,2026-08-12 与内网核对)。
+    # 案由默认值:与内网一致的规律——跟随**最后一条**请求的第二层类型(案由字典=
+    # 请求树第二层名称集合)。注意不是第一条:2026-08-12 用多类型请求案件实测,
+    # 内网服务端按最后一条请求覆盖案由(单请求时首末一致,故早期样例未暴露)。
     # 推不出时退回案件已填值的精确/模糊匹配;还不行置空并提示
     # (原值静默丢弃会让用户以为案由已选好)。
     dict_names = [d["name"] for d in case_reasons]
     case_reason = ""
-    first_path = (requests_draft[0].get("path_names") or []) if requests_draft else []
-    if len(first_path) >= 2 and first_path[1] in dict_names:
-        case_reason = first_path[1]
+    for r in reversed(requests_draft):
+        path = r.get("path_names") or []
+        if len(path) >= 2 and path[1] in dict_names:
+            case_reason = path[1]
+            break
     if not case_reason:
         filled = case.get("case_reason") or ""
         if filled in dict_names:
@@ -899,8 +1013,9 @@ async def build_draft(case: dict) -> dict:
             "apply_at": date.today().isoformat(),
             "town_id": DEFAULT_TOWN_ID,
             "case_reason": case_reason,
-            "is_sign_labor_contract": 1,
-            "is_pay_social_insurance": 1,
+            # 案件级合同/社保标志:取第一申请人的结构化值,缺省 1(内网默认有)。
+            "is_sign_labor_contract": first.get("is_sign_labor_contract") if first.get("is_sign_labor_contract") is not None else 1,
+            "is_pay_social_insurance": first.get("is_pay_social_insurance") if first.get("is_pay_social_insurance") is not None else 1,
             "is_easy": 1,
             "company_nature": DEFAULT_COMPANY_NATURE,
             "id_type": DEFAULT_ID_TYPE,
@@ -912,12 +1027,21 @@ async def build_draft(case: dict) -> dict:
         "respondents": respondents,
         "company_fills": company_fills,
         "fact_content": fact_content,
-        "fact_parts": {
-            "entry_date": first.get("entry_date"),
-            "work_place": first.get("work_place"),
-            "position": first.get("position"),
-            "monthly_wage": first.get("monthly_wage"),
-        },
+        # 逐申请人事实要素(对话框"自动生成"按钮按此重新拼接,与 compose_case_facts 同规则)
+        "fact_parties": [
+            {
+                "name": p.get("name"),
+                "entry_date": p.get("entry_date"),
+                "work_place": p.get("work_place"),
+                "position": p.get("position"),
+                "monthly_wage": p.get("monthly_wage"),
+                "is_sign_labor_contract": p.get("is_sign_labor_contract"),
+                "is_pay_social_insurance": p.get("is_pay_social_insurance"),
+                "main_causes": p.get("main_causes") or [],
+                "facts": p.get("facts"),
+            }
+            for p in applicants
+        ],
         "errors": errors,
         "warnings": warnings,
         "meta": {

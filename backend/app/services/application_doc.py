@@ -108,12 +108,26 @@ def _party_requests(app: dict) -> list[tuple[str, dict | None]]:
     return rows
 
 
-def build_requests_text(applicants: list[dict]) -> str:
-    """所有申请人的请求合并编号;已带数字序号的不重复添加。"""
+def _disambiguate_applicant(text: str, seq: int) -> str:
+    """多申请人案件:请求文本里泛指的"申请人"→"申请人N"(seq 从 1 起)。
+    与 case_submit 同名函数同一正则;"被申请人"/已编号的"申请人N"不受影响。"""
+    return re.sub(r"(?<!被)申请人(?!\d)", f"申请人{seq}", text)
+
+
+def build_requests_text(applicants: list[dict], respondents: list[dict] | None = None) -> str:
+    """所有申请人的请求合并编号;已带数字序号的不重复添加。
+    多申请人时给每条请求的"申请人"加编号,多被申请人时支付类表述改
+    "各被申请人共同",与内网提交口径一致。"""
+    multi = len([a for a in applicants if a.get("name")]) > 1
+    plural_resp = len([r for r in (respondents or []) if r.get("name")]) > 1
     all_requests: list[str] = []
     request_index = 1
-    for app in applicants:
+    for ai, app in enumerate(applicants):
         for req, _ in _party_requests(app):
+            if multi:
+                req = _disambiguate_applicant(req, ai + 1)
+            if plural_resp:
+                req = req.replace("被申请人向申请人", "各被申请人共同向申请人")
             if re.match(r"^\d+[\.、]", req):
                 all_requests.append(req)
             else:
@@ -158,28 +172,20 @@ def build_total_amount(applicants: list[dict]) -> str:
 
 
 def build_facts_reasons(applicants: list[dict], respondents: list[dict]) -> str:
-    """每人一段:入职信息 + 事实理由;末尾加通用结尾。"""
+    """每人一段(compose_party_facts 拼接,与提交内网同一规则);末尾加通用结尾。"""
+    from app.services.case_submit import compose_party_facts  # 延迟导入避免模块级耦合
+
     parts: list[str] = []
     default_workplace = respondents[0].get("name") if respondents else ""
+    total = len(applicants)
     for index, app in enumerate(applicants):
-        seq = str(index + 1) if len(applicants) > 1 else ""
-        paragraph = ""
-        if app.get("entry_date") or app.get("position") or app.get("work_place") or app.get("monthly_wage"):
-            date_str = _cn_date(app.get("entry_date"))
-            paragraph += f"申请人{seq}于{date_str}入职于被申请人处"
-            if app.get("position"):
-                paragraph += f"从事{app['position']}工作"
-            work_location = app.get("work_place") or default_workplace or ""
-            if work_location:
-                paragraph += f"，工作地点为{work_location}"
-            if app.get("monthly_wage"):
-                paragraph += f"，双方约定月工资为{app['monthly_wage']}元"
-            paragraph += "。"
-        facts = (app.get("facts") or "").strip()
-        if facts:
-            paragraph += facts
-        if paragraph:
-            parts.append(paragraph)
+        q = dict(app)
+        # 工作地点缺省时沿用 InfoWeb 旧行为:用第一被申请人名称兜底。
+        if not q.get("work_place"):
+            q["work_place"] = default_workplace
+        para = compose_party_facts(q, index + 1, total)
+        if para.strip():
+            parts.append(para)
     parts.append(
         "申请人为被申请人提供劳动，被申请人依法应当按照劳动合同约定和国家规定，"
         "及时足额按月向申请人支付劳动报酬。现申请人为了维护自身的合法权益，特依法提起仲裁，望予以公正裁决。"
@@ -245,7 +251,9 @@ def generate_application(case_data: dict, output_path: Path) -> Path:
     data = {
         "applicant_info": build_applicant_info(case_data.get("applicants") or []),
         "respondent_info": build_respondent_info(case_data.get("respondents") or []),
-        "requests": build_requests_text(case_data.get("applicants") or []),
+        "requests": build_requests_text(
+            case_data.get("applicants") or [], case_data.get("respondents") or []
+        ),
         "total_amount": build_total_amount(case_data.get("applicants") or []),
         "facts_reasons": build_facts_reasons(
             case_data.get("applicants") or [], case_data.get("respondents") or []
