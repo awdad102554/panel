@@ -8,6 +8,7 @@ import PartyAgentsEditor from "@/components/PartyAgentsEditor.vue";
 import PartyRequestsEditor, { type ReqRow } from "@/components/PartyRequestsEditor.vue";
 import VirtualCaseSubmitDialog from "@/components/VirtualCaseSubmitDialog.vue";
 import { catalogItemOf, disambiguateApplicant, isMultiTemplate, pluralizeRespondent } from "@/utils/requestCatalog";
+import { composePartyFacts } from "@/utils/factCompose";
 
 // 表单里的当事人:在 Party 基础上带请求编辑器的行状态(保存时拆开,不入库)。
 type PartyForm = Party & { reqRows?: ReqRow[]; causeOther?: string };
@@ -432,6 +433,21 @@ function partiesText(parties: Party[]) {
   return parties.map((p) => p.name).join("、") || "-";
 }
 
+/** 事实理由自动生成预览(与保存到内网/申请书同一拼接规则;含"其他主因"输入框内容)。 */
+function factsPreview(p: PartyForm, idx: number): string {
+  return composePartyFacts(
+    {
+      ...p,
+      main_causes: [
+        ...(p.main_causes ?? []),
+        ...(p.causeOther?.trim() ? [p.causeOther.trim()] : []),
+      ],
+    },
+    idx + 1,
+    applicants.value.length,
+  );
+}
+
 async function refresh() {
   loading.value = true;
   try {
@@ -640,6 +656,10 @@ onMounted(refresh);
                   placeholder="补充事实(选填),如受伤/离职经过等;拼接在自动生成文本的合同社保段之后"
                   style="margin-top: 6px"
                 />
+                <div class="facts-preview">
+                  <span class="facts-preview-label">自动生成预览(保存内网/申请书按此拼接,提交时可再编辑):</span>
+                  {{ factsPreview(p, idx) }}
+                </div>
               </div>
               <div class="field span4">
                 <label>代理人(选填,保存内网时随当事人一并保存)</label>
@@ -829,5 +849,22 @@ onMounted(refresh);
   font-size: 13px;
   color: var(--el-text-color-regular);
   flex-shrink: 0;
+}
+
+.facts-preview {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+  background: #f8fafc;
+  border: 1px dashed #dcdfe6;
+  border-radius: 6px;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+}
+
+.facts-preview-label {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 </style>

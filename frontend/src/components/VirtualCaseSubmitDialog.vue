@@ -11,6 +11,7 @@ import {
   needsDatesTemplate,
   needsOtherTemplate,
 } from "@/utils/requestCatalog";
+import { composeCaseFacts } from "@/utils/factCompose";
 
 const props = defineProps<{
   visible: boolean;
@@ -258,68 +259,20 @@ function buildSpec(): SubmitSpec {
   };
 }
 
-// 事实理由自动生成(与后端 compose_case_facts 同规则:逐申请人四段式拼接,
-// 内网审核通过案件的样本总结;主因以勾选区为准——已预填存量值,改了勾选重新生成即生效)。
+// 事实理由自动生成(共享 utils/factCompose,与后端 compose_case_facts 同规则;
+// 主因以勾选区为准——已预填存量值,改了勾选重新生成即生效)。
 function composeFacts() {
   const parties = draft.value?.fact_parties ?? [];
   if (!parties.length) return;
   const caseCauses = [
     ...mainCauseSelected.value,
     ...(mainCauseOther.value.trim() ? [mainCauseOther.value.trim()] : []),
-  ]
-    .map((c) => c.trim())
-    .filter(Boolean);
-  const total = parties.length;
-  const paras = parties.map((p, i) => {
-    const subj = total <= 1 ? "本人" : `申请人${i + 1}`;
-    const facts = (p.facts ?? "").trim().replace(/。+$/, "");
-    const causes = (i === 0 ? caseCauses : (p.main_causes ?? []))
-      .map((c) => c.trim())
-      .filter(Boolean);
-    // 严格校验,与后端 _to_date_str/_to_float 口径一致(脏数据不生成怪文本)
-    const entry = /^\d{4}-\d{2}-\d{2}$/.test(p.entry_date ?? "") ? p.entry_date! : null;
-    const wageRaw = String(p.monthly_wage ?? "").replace(/,/g, "");
-    const wage =
-      /^\d+(\.\d+)?$/.test(wageRaw) && parseFloat(wageRaw) ? wageRaw.replace(/\.?0+$/, "") : null;
-    // 纯旧数据(无结构化字段、facts 为整段叙述):直接用叙述原文,不虚构合同社保表述
-    const structured = !!(
-      entry ||
-      p.work_place ||
-      p.position ||
-      wage ||
-      p.is_sign_labor_contract != null ||
-      p.is_pay_social_insurance != null
-    );
-    if (!structured && facts) {
-      return facts + "。" + (causes.length ? `因${causes.join("，")}。` : "");
-    }
-    let out = "";
-    const tail: string[] = [];
-    if (p.work_place) tail.push(`实际工作地点${p.work_place}`);
-    if (p.position) tail.push(`工作岗位为${p.position}`);
-    if (wage) tail.push(`月工资标准为${wage}元`);
-    if (entry) {
-      const [y, m, d] = entry.split("-");
-      out += `${subj}于${y}年${m}月${d}日入职被申请人处`;
-      if (tail.length) out += ", " + tail.join("，");
-      out += "。";
-    } else if (tail.length) {
-      // 没填入职时间但填了地点/岗位/工资:片段不丢
-      out += tail.join("，") + "。";
-    }
-    const signVal = p.is_sign_labor_contract ?? form.value.is_sign_labor_contract;
-    const insVal = p.is_pay_social_insurance ?? form.value.is_pay_social_insurance;
-    const sign = signVal === 0 ? "没有" : "有";
-    const ins = insVal === 0 ? "没有" : "有";
-    // 合同社保段沿用"本人"(段落开头已点明申请人N,再用编号读三遍佶屈)
-    out += `本人入职后，被申请人${sign}与本人签订书面劳动合同,${ins}为本人缴纳社会保险费`;
-    if (facts) out += `;${facts}。`;
-    if (causes.length) out += `${facts ? "因" : ";因"}${causes.join("，")}。`;
-    if (!facts && !causes.length) out += "。";
-    return out;
+  ];
+  form.value.fact_content = composeCaseFacts(parties, {
+    sign: form.value.is_sign_labor_contract,
+    ins: form.value.is_pay_social_insurance,
+    caseCauses,
   });
-  const ending = "为维护本人合法权益，特提出申请，望裁如所请。";
-  form.value.fact_content = total <= 1 ? paras[0] + ending : [...paras, ending].join("\n");
 }
 
 async function openPreview() {
