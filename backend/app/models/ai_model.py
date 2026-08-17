@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +25,9 @@ class AIModelConfig(Base):
     api_key: Mapped[str] = mapped_column(String(255))  # 明文存储，响应脱敏；骨架阶段合理简化
     model_name: Mapped[str] = mapped_column(String(64))
     temperature: Mapped[float | None] = mapped_column(Float, default=0.2, nullable=True)
+    # 单次请求最大输出 token 数;新增配置时前端按主流模型上限预设自动填入(可手改),
+    # 供真实 LLM Provider 发请求时使用(mock 阶段不落请求)。
+    max_tokens: Mapped[int | None] = mapped_column(Integer, default=8192, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
 

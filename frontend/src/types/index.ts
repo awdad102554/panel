@@ -212,6 +212,7 @@ export interface AIModelConfig {
   api_key_masked: string;
   model_name: string;
   temperature: number | null;
+  max_tokens: number | null;
   is_enabled: boolean;
   remark: string | null;
   created_at: string;

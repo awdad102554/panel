@@ -11,6 +11,7 @@ class AIModelCreate(BaseModel):
     api_key: str
     model_name: str
     temperature: float | None = 0.2
+    max_tokens: int | None = 8192
     remark: str | None = None
 
 
@@ -23,6 +24,7 @@ class AIModelUpdate(BaseModel):
     api_key: str | None = None
     model_name: str | None = None
     temperature: float | None = None
+    max_tokens: int | None = None
     remark: str | None = None
 
 
@@ -38,6 +40,7 @@ class AIModelOut(BaseModel):
     api_key_masked: str
     model_name: str
     temperature: float | None = None
+    max_tokens: int | None = None
     is_enabled: bool
     remark: str | None = None
     created_at: datetime

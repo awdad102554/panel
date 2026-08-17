@@ -9,8 +9,8 @@
 - 未通过/退回状态(结案审核未通过/结案审批未通过/处理文书审批未通过)意味着要
   返工,按最高优先级红色 overdue 提醒。
 - 组织调解:进入调解环节超过 case_mediation_alert_days 天(约一个月)提醒(soon)。
-- reserve/receive.status 枚举:0 待审核(工作人员待办,按天数监控)/ 其余=已处理,
-  单列 rejected 默认隐藏。收件超期按红色 overdue 提醒。
+- reserve/receive.status 枚举:0 待审核(工作人员待办,按原生倒计时/天数监控)/
+  其余=已处理,单列 rejected 默认隐藏。收件/预约超期按红色 overdue 提醒。
 - current_step 枚举不封闭,未识别的子状态按普通 handle 在办处理,不报错。
 """
 
@@ -149,15 +149,20 @@ def compute_urgency(
         # 2 审核不通过 / 3 现场确认通过 / 4 现场确认不通过。
         # 不通过(2/4)是退回申请人补正,不是工作人员待办,单列 rejected 不算超期;
         # 通过(1/3)表示 reserve 环节工作人员的动作已完成,不告警;
-        # 待审核(0)才是工作人员该推进的,按原生 overdue_days / 进入天数估算。
+        # 待审核(0)才是工作人员该推进的:优先用内网原生 reserve_time_limit 倒计时
+        # (解析成的 native_remaining_days,与收件同一套临近/紧急阈值,超期红色 overdue),
+        # 拿不到再按进入天数估算。
         reserve_status = (row.raw_payload or {}).get("status")
         if reserve_status in (2, 4):
             return UrgencyResult("rejected", None, "status")
         if reserve_status in (1, 3):
             return UrgencyResult("normal", None, "status")
-        # 预约:overdue_days>0 转成的负数直接判超期,否则按进入天数估算。
-        if row.native_remaining_days is not None and row.native_remaining_days < 0:
-            return UrgencyResult("overdue", row.native_remaining_days, "native")
+        if row.native_remaining_days is not None:
+            return UrgencyResult(
+                _by_days(row.native_remaining_days, settings.case_urgency_soon_days, settings.case_urgency_urgent_days),
+                row.native_remaining_days,
+                "native",
+            )
         return _elapsed_urgency(
             row, today, settings.case_urgency_reserve_days,
             settings.case_urgency_soon_days, settings.case_urgency_urgent_days,

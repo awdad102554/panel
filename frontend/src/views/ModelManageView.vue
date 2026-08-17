@@ -4,6 +4,7 @@ import { onMounted, reactive, ref } from "vue";
 
 import * as modelApi from "@/api/aiModel";
 import type { AIModelConfig } from "@/types";
+import { DEFAULT_MAX_TOKENS, lookupModelMaxTokens } from "@/utils/modelPresets";
 
 const models = ref<AIModelConfig[]>([]);
 const activeModel = ref<AIModelConfig | null>(null);
@@ -28,8 +29,18 @@ const form = reactive({
   api_key: "",
   model_name: "",
   temperature: 0.2 as number | null,
+  max_tokens: DEFAULT_MAX_TOKENS as number | null,
   remark: "",
 });
+
+/** 用户手动改过最大输出后,不再随模型名自动覆盖。 */
+const maxTokensTouched = ref(false);
+
+function onModelNameInput() {
+  if (maxTokensTouched.value) return;
+  const preset = lookupModelMaxTokens(form.model_name);
+  if (preset !== null) form.max_tokens = preset;
+}
 
 function resetForm() {
   form.name = "";
@@ -38,7 +49,9 @@ function resetForm() {
   form.api_key = "";
   form.model_name = "";
   form.temperature = 0.2;
+  form.max_tokens = DEFAULT_MAX_TOKENS;
   form.remark = "";
+  maxTokensTouched.value = false;
 }
 
 async function refresh() {
@@ -67,7 +80,10 @@ function openEdit(row: AIModelConfig) {
   form.api_key = "";
   form.model_name = row.model_name;
   form.temperature = row.temperature;
+  form.max_tokens = row.max_tokens ?? DEFAULT_MAX_TOKENS;
   form.remark = row.remark ?? "";
+  // 编辑已有配置:保留已存的上限,不随模型名重新触发自动填入。
+  maxTokensTouched.value = true;
   dialogVisible.value = true;
 }
 
@@ -138,6 +154,11 @@ onMounted(refresh);
       <el-table-column prop="name" label="名称" width="160" />
       <el-table-column prop="provider" label="供应商" width="130" />
       <el-table-column prop="model_name" label="模型名" width="150" />
+      <el-table-column label="最大输出" width="110">
+        <template #default="{ row }">
+          {{ row.max_tokens?.toLocaleString() ?? "-" }}
+        </template>
+      </el-table-column>
       <el-table-column prop="base_url" label="Base URL" show-overflow-tooltip />
       <el-table-column prop="api_key_masked" label="密钥" width="140" />
       <el-table-column label="状态" width="100">
@@ -197,7 +218,21 @@ onMounted(refresh);
           />
         </el-form-item>
         <el-form-item label="模型名">
-          <el-input v-model="form.model_name" placeholder="如：qwen-max / gpt-4o" />
+          <el-input
+            v-model="form.model_name"
+            placeholder="如：deepseek-v4-pro / qwen3.7-max"
+            @input="onModelNameInput"
+          />
+        </el-form-item>
+        <el-form-item label="最大输出">
+          <el-input-number
+            v-model="form.max_tokens"
+            :min="1"
+            :max="1048576"
+            :step="1024"
+            @change="maxTokensTouched = true"
+          />
+          <span class="field-hint">token；按模型名自动带入主流上限，可手动调整</span>
         </el-form-item>
         <el-form-item label="Temperature">
           <el-input-number v-model="form.temperature" :min="0" :max="2" :step="0.1" />
@@ -246,5 +281,10 @@ onMounted(refresh);
 }
 .toolbar {
   margin-bottom: 16px;
+}
+.field-hint {
+  margin-left: 10px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 </style>

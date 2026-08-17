@@ -8,6 +8,7 @@ export interface AIModelPayload {
   api_key?: string;
   model_name: string;
   temperature?: number | null;
+  max_tokens?: number | null;
   remark?: string | null;
 }
 

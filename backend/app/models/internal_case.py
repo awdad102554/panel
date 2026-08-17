@@ -26,7 +26,8 @@ class InternalCaseTracking(Base):
 
     数据源是内网案件系统(10.96.10.78:8080)的 arb/{reserve,receive,handle} 三个环节接口,
     由后台定时任务(app.services.internal_case_sync)拉取。注意:receive/reserve 接口返回的是
-    该环节的全量历史记录(不是"当前仍停留在该环节"的过滤列表),因此同一个 case_id 可能同时
+    未过滤列表(不是"当前仍停留在该环节"的过滤列表;reserve 审核通过即离开列表,只留
+    待审核/退回补正记录),因此同一个 case_id 可能同时
     出现在 receive 和 handle 里;同步按 reserve→receive→handle 顺序 upsert,后写的 handle 覆盖前者,
     最终 stage 反映案件真实所处的最靠后环节。
     """

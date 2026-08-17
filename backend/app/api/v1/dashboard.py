@@ -268,10 +268,10 @@ def _row_in_card(key: str, row: InternalCaseTracking, urgency: str, today: date)
         # 中止过久:审理中止超过 case_urgency_paused_alert_days 的案件。
         return urgency == "paused_overdue"
     if key == "pending_receive":
-        # 待办案件(2026-08 确认口径):收件环节待审核(status=0)、尚未立案的案件,
-        # 即需要工作人员审查推进的收件。已处理/已退回的不算。
+        # 待办案件(2026-08-17 确认口径):收件环节或线上预约待审核(status=0)、
+        # 尚未立案的案件,即需要工作人员审查推进的事项。已处理/已退回的不算。
         return (
-            row.stage == InternalStage.RECEIVE
+            row.stage in (InternalStage.RECEIVE, InternalStage.RESERVE)
             and (row.raw_payload or {}).get("status") == 0
         )
     if key == "open_cases":
@@ -307,8 +307,8 @@ async def _snapshot_stats(db: AsyncSession) -> dict[str, int] | None:
     口径(与办案进度监控页共用同一套 compute_urgency 紧急度逻辑,两页数字互相对得上):
     - due_reminders(时效提醒): 紧急度为 overdue / urgent / soon 的案件数,
       即时效维度需要处理的事项(已超期、审批退回返工、紧急、临近)。
-    - pending_receive(待办案件): 收件环节待审核(status=0)、尚未立案的案件
-      + 待录入内网的预登记案件(SQLite,见 db/virtual.py)。
+    - pending_receive(待办案件): 收件环节或线上预约待审核(status=0)、尚未立案
+      的案件 + 待录入内网的预登记案件(SQLite,见 db/virtual.py)。
     - open_cases(在办案件): handle 环节未结案/未归档的案件。
     - pending_mediation(待调解): handle 环节 current_step=组织调解。
     - heard_awaiting_decision(已开庭待裁决): handle 环节 current_step=仲裁裁决中。

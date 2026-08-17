@@ -11,7 +11,8 @@
   (替代 ~46 页全量),日常循环只用轻量。
 
 同步顺序 reserve → receive → handle:同一个 case_id 可能同时出现在多个环节的返回里
-(receive/reserve 返回的是该环节的全量历史,不是"当前仍停留在该环节"的过滤列表),后处理的 handle
+(receive/reserve 返回的是未过滤列表,不是"当前仍停留在该环节"的过滤列表;reserve 审核通过
+即离开列表,只留待审核/退回补正记录),后处理的 handle
 覆盖前者,最终 stage 反映案件真实所处的最靠后环节。
 
 单个环节请求失败只记 warning、跳过该环节,不影响其余环节(仿 CaseSystemStatsService 的容错风格)。
@@ -300,9 +301,14 @@ def _map_record(stage: InternalStage, raw: dict) -> dict:
         end_at = _parse_dt(raw.get("end_at"))
         end_way = raw.get("end_way")
     elif stage is InternalStage.RESERVE:
-        overdue = _parse_int(raw.get("overdue_days"))
-        # 统一"负数=已超期"语义,与 handle 的 closing_time_limit 一套读取逻辑。
-        native_remaining_days = -overdue if overdue and overdue > 0 else None
+        # 预约待审核自带 reserve_time_limit(中文文案,与 receive_time_limit 同格式,
+        # 如 "2天"/"超期3天"),优先解析成统一的剩余天数(负数=超期)。
+        native_remaining_days = _parse_time_limit_days(raw.get("reserve_time_limit"))
+        if native_remaining_days is None:
+            # 兜底:overdue_days>0 转负数,统一"负数=已超期"语义,
+            # 与 handle 的 closing_time_limit 一套读取逻辑。
+            overdue = _parse_int(raw.get("overdue_days"))
+            native_remaining_days = -overdue if overdue and overdue > 0 else None
     elif stage is InternalStage.RECEIVE:
         # 收件自带 receive_time_limit(中文文案),解析成统一的剩余天数(负数=超期)。
         native_remaining_days = _parse_time_limit_days(raw.get("receive_time_limit"))
@@ -383,14 +389,14 @@ async def _sync_internal_cases(
 
     deleted_ids: list[str] = []
     if full and len(fetched_stages) == len(_STAGE_SPECS):
-        # 全量模式下 receive/handle 拉的是全量历史,快照多出=内网已删除,顺手清理
-        # (轻量模式的清理走消失检测;reserve 接口只回不通过记录、不是全量,不参与)。
+        # 全量模式下 3 个环节拉的都是全量历史,快照多出=内网已删除,顺手清理
+        # (轻量模式的清理走消失检测)。
         # 任一环节拉取失败则跳过清理,防止把"没拉到"误判成"已删除"。
         deleted_ids = [
             ext_id
             for ext_id, prev in existing.items()
             if ext_id not in merged
-            and prev.stage in (InternalStage.RECEIVE, InternalStage.HANDLE)
+            and prev.stage in (InternalStage.RESERVE, InternalStage.RECEIVE, InternalStage.HANDLE)
         ]
         if deleted_ids:
             counts["deleted"] = len(deleted_ids)
@@ -432,7 +438,9 @@ async def _sync_internal_cases(
                     _merge_by_priority(merged, mapped)
             counts[count_key] = fetched
 
-        counts["refetched"], deleted_ids = await _refetch_disappeared(client, existing, merged)
+        counts["refetched"], deleted_ids = await _refetch_disappeared(
+            client, existing, merged, reserve_complete=InternalStage.RESERVE in fetched_stages
+        )
         if deleted_ids:
             counts["deleted"] = len(deleted_ids)
 
@@ -517,6 +525,8 @@ async def _refetch_disappeared(
     client: CaseSystemClient,
     existing: dict[str, InternalCaseTracking],
     merged: dict[str, dict],
+    *,
+    reserve_complete: bool,
 ) -> tuple[int, list[str]]:
     """轻量同步:补拉"上一轮还在办、本轮不在筛选结果里"的案件。
 
@@ -529,6 +539,12 @@ async def _refetch_disappeared(
       (_probe_receive_by_date):找到=已处理/已修改,更新快照;窗口内找不到=
       内网已删除,删除快照行(误删代价低,全量同步可恢复)。
     探测请求失败的保留快照原值下轮重试,宁可不删。
+
+    reserve 环节单独处理:轻量同步对 reserve 是全量拉取(无筛选),本轮拉取成功
+    (reserve_complete)而快照行不在返回里 = 已审核离开预约环节(转收件,内网可能
+    另建新 case_id)或内网已删除。预约无案号(案号字段为空)无法单点探测,直接
+    删除快照(误删可用全量同步恢复);转收件后的案件由 receive 侧同步自然捕获。
+    reserve 拉取失败时保留原值下轮重试。
 
     返回 (补拉更新件数, 判定删除的 external_case_id 列表)——删除由调用方落库。
     """
@@ -544,7 +560,14 @@ async def _refetch_disappeared(
             if (prev.raw_payload or {}).get("status") != 0:
                 continue
         else:
-            continue  # reserve 环节返回的本来就是不通过记录,无需检测
+            # reserve:全量拉取成功时,消失=已离开预约环节或内网已删除,删除快照。
+            if not reserve_complete:
+                continue
+            deleted_ids.append(ext_id)
+            logger.info(
+                "预约案件 %s 已离开预约列表(审核转收件或内网删除),删除快照", ext_id
+            )
+            continue
         try:
             raw = await _fetch_single_by_case_no(
                 client, prev.stage, prev.case_no, expected_case_id=ext_id
@@ -630,7 +653,7 @@ async def verify_consistency(
     - checked: 内网全量案件数
     - missing_in_snapshot: 内网有但快照缺失(轻量同步漏同步)
     - field_mismatches: 两边都有但 阶段/子状态/结案字段 不一致(轻量同步没跟上)
-    - only_in_snapshot: 快照有但内网全量未返回的条数(预约历史等,通常无害,仅计数)
+    - only_in_snapshot: 快照有但内网全量未返回的条数(通常无害,仅计数)
     - stage_errors: 抓取失败被跳过的环节及原因(失败的环节不参与比对,绝不把
       "没拉到"当成"远端为空"误报本地缺失)
     返回的差异列表各最多 50 条;落库明细各最多 500 条。
@@ -695,10 +718,10 @@ async def _verify_consistency(
                     }
                 )
             continue  # 环节都不同了,子状态不再逐项比
-        # receive 环节加比内网 status(不在 _VERIFY_FIELDS 里):"保存未审批"的收件
+        # receive/reserve 环节加比内网 status(不在 _VERIFY_FIELDS 里):"保存未审批"的收件
         # 被退回/处理后,环节和子状态都不变,只有 raw_payload.status 变化(2026-08-10
-        # 实测陈宁娥案:快照停在待审核,校验此前报不出来)。
-        if expected["stage"] is InternalStage.RECEIVE:
+        # 实测陈宁娥案:快照停在待审核,校验此前报不出来);预约待审核被退回(0→2)同理。
+        if expected["stage"] in (InternalStage.RECEIVE, InternalStage.RESERVE):
             # 两侧都过 _parse_int:快照 JSONB 里是 int,内网若返回字符串 "0" 不致噪声。
             snap_status = _parse_int((prev.raw_payload or {}).get("status"))
             net_status = _parse_int((expected["raw_payload"] or {}).get("status"))
@@ -708,7 +731,7 @@ async def _verify_consistency(
                     mismatches.append(
                         {
                             "case_no": prev.case_no,
-                            "field": "receive_status",
+                            "field": f"{expected['stage'].value}_status",
                             "snapshot": snap_status,
                             "intranet": net_status,
                         }

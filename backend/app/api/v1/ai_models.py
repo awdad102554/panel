@@ -31,6 +31,7 @@ def _to_out(model: AIModelConfig) -> AIModelOut:
         api_key_masked=_mask_key(model.api_key),
         model_name=model.model_name,
         temperature=model.temperature,
+        max_tokens=model.max_tokens,
         is_enabled=model.is_enabled,
         remark=model.remark,
         created_at=model.created_at,

@@ -103,3 +103,23 @@ async def test_all_stages_ok_no_stage_errors():
     assert result["stage_errors"] == []
     assert result["missing_total"] == 0
     assert result["checked"] == 1
+
+
+async def test_reserve_status_change_reported():
+    """reserve 环节加比内网 status:预约待审核被退回(0→2)环节/子状态都不变,
+    只有 raw_payload.status 变化,必须报成 reserve_status 不一致(与 receive 同口径)。"""
+    prev = _tracking("343842", InternalStage.RESERVE)
+    prev.raw_payload = {"case_id": "343842", "status": 0}
+    client = FakeClient(
+        {RESERVE_PATH: [{"case_id": "343842", "status": 2, "overdue_days": 0}]}
+    )
+    db = FakeDB([prev])
+
+    result = await verify_consistency(db, client)
+
+    assert result["stage_errors"] == []
+    assert result["mismatch_total"] == 1
+    mismatch = result["field_mismatches"][0]
+    assert mismatch["field"] == "reserve_status"
+    assert mismatch["snapshot"] == 0
+    assert mismatch["intranet"] == 2

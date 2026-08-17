@@ -49,7 +49,7 @@ type CardKey = (typeof cards)[number]["key"];
 // 阈值类文案按"时限设置"的当前生效值动态生成,随设置变化。
 const CARD_HINTS = computed<Partial<Record<CardKey, string>>>(() => ({
   due_reminders: `时效维度需要处理的事项:已超期(含审批退回需返工的案件)、紧急(剩${urgentDays.value}天内)、临近(剩${soonDays.value}天内)。`,
-  pending_receive: "收件环节待审核、尚未立案的案件,以及待录入内网的预登记案件;已处理/已退回的收件和已录入的预登记不在此列。",
+  pending_receive: "收件环节/线上预约待审核、尚未立案的案件,以及待录入内网的预登记案件;已处理/已退回的收件、预约和已录入的预登记不在此列。",
   open_cases: "已立案、尚未结案的全部在办案件(含中止/调解/裁决中等子状态),按紧急度排序。",
   paused_long: `审理中止超过 ${pausedAlertDays.value} 天阈值的案件,需要跟进是否恢复审理。`,
 }));

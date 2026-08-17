@@ -76,7 +76,7 @@ async def test_no_case_no_deleted_in_intranet():
     client = FakeClient({})  # 所有请求都返回空
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"341415": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"341415": prev}, merged, reserve_complete=True)
 
     assert refetched == 0
     assert deleted == ["341415"]
@@ -101,7 +101,7 @@ async def test_no_case_no_processed_found_by_date():
     client = FakeClient({(RECEIVE_PATH, "date=2026-08-06"): [found]})
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"341421": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"341421": prev}, merged, reserve_complete=True)
 
     assert refetched == 1
     assert deleted == []
@@ -117,7 +117,7 @@ async def test_probe_failure_keeps_snapshot():
     client = FakeClient({}, fail_on={(RECEIVE_PATH, "date=2026-08-06")})
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"341415": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"341415": prev}, merged, reserve_complete=True)
 
     assert refetched == 0
     assert deleted == []
@@ -147,7 +147,7 @@ async def test_case_no_processed_then_probe_handle():
     })
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"500": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"500": prev}, merged, reserve_complete=True)
 
     assert refetched == 1
     assert deleted == []
@@ -172,7 +172,7 @@ async def test_case_no_processed_handle_probe_failure_keeps_snapshot():
     )
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"501": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"501": prev}, merged, reserve_complete=True)
 
     assert refetched == 0
     assert deleted == []
@@ -187,7 +187,7 @@ async def test_no_payload_date_keeps_snapshot():
     client = FakeClient({})
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"900": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"900": prev}, merged, reserve_complete=True)
 
     assert refetched == 0
     assert deleted == []
@@ -220,7 +220,7 @@ async def test_hash_case_no_approved_probes_handle_with_new_formal_case_no():
     })
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"600": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"600": prev}, merged, reserve_complete=True)
 
     assert refetched == 1
     assert deleted == []
@@ -249,7 +249,7 @@ async def test_date_probe_uses_receive_at_when_application_at_missing():
     client = FakeClient({(RECEIVE_PATH, "date=2026-08-04"): [found]})
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"700": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"700": prev}, merged, reserve_complete=True)
 
     assert refetched == 1
     assert deleted == []
@@ -264,12 +264,81 @@ async def test_case_no_not_found_falls_to_date_probe():
     client = FakeClient({})  # 案号、日期全部空
     merged: dict[str, dict] = {}
 
-    refetched, deleted = await _refetch_disappeared(client, {"502": prev}, merged)
+    refetched, deleted = await _refetch_disappeared(client, {"502": prev}, merged, reserve_complete=True)
 
     assert refetched == 0
     assert deleted == ["502"]
     assert any("case_no" in p for _, p in client.calls)  # 先试了案号
     assert any("application_date" in p for _, p in client.calls)  # 再退到日期探测
+
+
+RESERVE_PATH = "/v1/api/admin/arb/reserve"
+
+
+def _reserve_tracking(ext_id: str, status: int = 0) -> InternalCaseTracking:
+    row = InternalCaseTracking()
+    row.external_case_id = ext_id
+    row.stage = InternalStage.RESERVE.value
+    row.current_step = None
+    row.case_no = ""  # 预约无正式案号
+    row.is_paused = False
+    row.raw_payload = {"case_id": ext_id, "status": status}
+    return row
+
+
+@pytest.mark.asyncio
+async def test_reserve_disappeared_deleted_when_fetch_complete():
+    """reserve 全量拉取成功时,消失的预约快照(已审核转收件/内网删除)直接删除,
+    不发任何探测请求(预约无案号可探)。"""
+    prev = _reserve_tracking("343842")
+    client = FakeClient({})
+    merged: dict[str, dict] = {}
+
+    refetched, deleted = await _refetch_disappeared(
+        client, {"343842": prev}, merged, reserve_complete=True
+    )
+
+    assert refetched == 0
+    assert deleted == ["343842"]
+    assert merged == {}
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_reserve_disappeared_kept_when_fetch_failed():
+    """reserve 拉取失败(reserve_complete=False):消失的预约快照保留原值下轮重试,
+    不能把"没拉到"误判成"已离开"。"""
+    prev = _reserve_tracking("343842")
+    client = FakeClient({})
+    merged: dict[str, dict] = {}
+
+    refetched, deleted = await _refetch_disappeared(
+        client, {"343842": prev}, merged, reserve_complete=False
+    )
+
+    assert refetched == 0
+    assert deleted == []
+    assert merged == {}
+    assert client.calls == []
+
+
+def test_map_record_reserve_parses_native_time_limit():
+    """reserve 优先解析原生 reserve_time_limit 文案(与 receive_time_limit 同格式,
+    负数=超期);解析不到退回 overdue_days 兜底。"""
+    from app.services.internal_case_sync import _map_record
+
+    raw = {"case_id": 1, "status": 0, "reserve_time_limit": "2天", "overdue_days": 0}
+    assert _map_record(InternalStage.RESERVE, raw)["native_remaining_days"] == 2
+
+    raw = {"case_id": 1, "status": 0, "reserve_time_limit": "超期3天", "overdue_days": 3}
+    assert _map_record(InternalStage.RESERVE, raw)["native_remaining_days"] == -3
+
+    # 无 reserve_time_limit 时 overdue_days>0 兜底(负数=超期)。
+    raw = {"case_id": 1, "status": 0, "overdue_days": 5}
+    assert _map_record(InternalStage.RESERVE, raw)["native_remaining_days"] == -5
+
+    raw = {"case_id": 1, "status": 2, "overdue_days": 0}
+    assert _map_record(InternalStage.RESERVE, raw)["native_remaining_days"] is None
 
 
 def test_map_record_accepts_string_stage():

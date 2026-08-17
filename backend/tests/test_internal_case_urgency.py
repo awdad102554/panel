@@ -151,6 +151,24 @@ def test_reserve_native_overdue_signal():
     assert result.source == "native"
 
 
+def test_reserve_native_time_limit_countdown():
+    """reserve 待审核优先用原生 reserve_time_limit 倒计时(解析成 native_remaining_days)
+    分档,与 receive 同一套临近/紧急阈值(2026-08-17 起,此前正数倒计时被忽略)。"""
+    row = make_row(InternalStage.RESERVE, native_remaining_days=4, raw_payload={"status": 0})
+    result = compute_urgency(row, None, SETTINGS)
+    assert result.urgency == "normal"  # 剩 4 > 临近阈值 3
+    assert result.source == "native"
+
+    row = make_row(InternalStage.RESERVE, native_remaining_days=2, raw_payload={"status": 0})
+    assert compute_urgency(row, None, SETTINGS).urgency == "soon"
+
+    row = make_row(InternalStage.RESERVE, native_remaining_days=1, raw_payload={"status": 0})
+    assert compute_urgency(row, None, SETTINGS).urgency == "urgent"
+
+    row = make_row(InternalStage.RESERVE, native_remaining_days=-1, raw_payload={"status": 0})
+    assert compute_urgency(row, None, SETTINGS).urgency == "overdue"
+
+
 def test_reserve_elapsed_estimate():
     row = make_row(InternalStage.RESERVE, days_since_phase=1)
     # 时限 5 天、过 1 天剩 4 天 > 临近阈值 3 → 正常(环节时限只定超期点,不定警告起点)
