@@ -108,5 +108,10 @@ npm run dev
 
 ## 测试和验证
 
-- 后端：`pytest backend/tests`（当前含健康检查测试）；亦可手工跑一遍最小闭环——创建案件 → 触发"收件预审 AI" → 确认输出 → 查看时间线，验证各层是否正确联动。
-- 前端：`npm run build`（`vue-tsc` 类型检查 + Vite 构建）；`npm run dev` 后在浏览器中人工走查案件总览、办案进度监控、统计分析、时限设置等页面。
+- 后端：`pytest backend/tests`（94 个用例，纯函数/内存测试，用假字典目录、不打内网），按模块覆盖：
+  - `test_health.py` 健康检查；
+  - `test_case_submit.py` / `test_application_doc.py` 预登记提交载荷与仲裁申请书拼接（请求文本/金额/intro/fact_reason 四段式、多申请人编号、多被申请人"各被申请人共同"等）；
+  - `test_complex_virtual_case.py` 复杂预登记案件全链路回归（多申请人 + 多被申请人 + 三类代理人 + 四种请求类型，验证 build_payload / build_draft / 申请书 parties/agents/requests/facts）；
+  - `test_internal_case_urgency.py` / `test_internal_case_refetch.py` / `test_internal_case_verify.py` / `test_internal_case_pause.py` / `test_virtual_case_urgency.py` 内网案件紧急度分档、消失案件补拉、一致性对账、中止天数回填与预登记紧急度。
+  - 亦可手工跑一遍最小闭环——创建案件 → 触发"收件预审 AI" → 确认输出 → 查看时间线，验证各层是否正确联动。
+- 前端：`npm run build`（`vue-tsc` 类型检查 + Vite 构建，产物即 nginx 服务目录）；`npm run dev` 后在浏览器中人工走查案件总览、办案进度监控、统计分析、时限设置等页面。
