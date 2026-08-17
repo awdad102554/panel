@@ -71,8 +71,8 @@ function stageLabel(row: InternalCase) {
 }
 
 function caseTitle(row: InternalCase) {
-  // 收件阶段案号是编码,不易辨识,改用申请人/被申请人展示。
-  if (row.stage === "receive") {
+  // 收件阶段案号是编码、线上预约尚未生成案号,均改用申请人/被申请人展示。
+  if (row.stage === "receive" || row.stage === "reserve") {
     const applicant = row.applicant ?? "?";
     const respondent = row.respondent ?? "?";
     return `${applicant} → ${respondent}`;
