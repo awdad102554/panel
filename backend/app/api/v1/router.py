@@ -9,6 +9,7 @@ from app.api.v1 import (
     dashboard,
     documents,
     internal_cases,
+    reserve_review,
     service_delivery,
     settings,
     stats,
@@ -25,6 +26,7 @@ api_router.include_router(timeline.router)
 api_router.include_router(ai.router)
 api_router.include_router(ai_models.router)
 api_router.include_router(internal_cases.router)
+api_router.include_router(reserve_review.router)
 api_router.include_router(documents.router)
 api_router.include_router(service_delivery.router)
 api_router.include_router(stats.router)

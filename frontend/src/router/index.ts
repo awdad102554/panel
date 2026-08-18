@@ -44,6 +44,11 @@ const router = createRouter({
           name: "model-manage",
           component: () => import("@/views/ModelManageView.vue"),
         },
+        {
+          path: "ai-reserve-review",
+          name: "ai-reserve-review",
+          component: () => import("@/views/AiReserveReviewView.vue"),
+        },
       ],
     },
     {

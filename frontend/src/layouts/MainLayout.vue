@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { MagicStick } from "@element-plus/icons-vue";
 import { useRoute } from "vue-router";
 
 const route = useRoute();
@@ -17,6 +18,10 @@ const route = useRoute();
         <el-menu router :default-active="route.path" class="dark-menu">
           <el-menu-item index="/dashboard">案件总览</el-menu-item>
           <el-menu-item index="/priority">办案进度监控</el-menu-item>
+          <el-menu-item index="/ai-reserve-review">
+            <el-icon><MagicStick /></el-icon>
+            <span>AI 预约审查</span>
+          </el-menu-item>
           <el-menu-item index="/virtual-cases">预登记案件</el-menu-item>
           <el-menu-item index="/stats">统计分析</el-menu-item>
           <el-menu-item index="/time-limits">时限设置</el-menu-item>

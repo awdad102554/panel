@@ -13,6 +13,7 @@ from app.models.internal_case import (
     InternalStage,
     SyncVerificationReport,
 )
+from app.models.reserve_ai_review import ReserveAIReview
 
 __all__ = [
     "User",
@@ -30,4 +31,5 @@ __all__ = [
     "InternalStage",
     "CaseTimeLimitOverride",
     "SyncVerificationReport",
+    "ReserveAIReview",
 ]

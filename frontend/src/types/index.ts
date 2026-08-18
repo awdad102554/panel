@@ -218,3 +218,64 @@ export interface AIModelConfig {
   created_at: string;
   updated_at: string;
 }
+
+export interface PendingReserve {
+  external_case_id: string;
+  reserve_row_id: number;
+  applicant: string;
+  respondent: string;
+  reserve_at: string | null;
+  case_reason: string | null;
+  reserve_time_limit: string | null;
+}
+
+export type ReviewConclusion = "通过" | "补正" | "驳回" | "审查失败";
+
+export interface ReviewCheck {
+  rule_id: string;
+  rule_name: string;
+  /** true=通过 false=不通过 null=需人工核验/未明确 */
+  passed: boolean | null;
+  note: string;
+}
+
+export interface ReserveReviewResult {
+  id: string;
+  external_case_id: string;
+  reserve_row_id: number;
+  applicant: string;
+  respondent: string;
+  case_reason: string | null;
+  conclusion: ReviewConclusion;
+  reason: string;
+  issues: string[];
+  missing_materials: string[];
+  rule_refs: string[];
+  checks: ReviewCheck[];
+  model_name: string | null;
+  case_snapshot: Record<string, unknown>;
+  raw_result: Record<string, unknown>;
+  created_at: string;
+  created_by: string;
+}
+
+export interface ReviewStepEvent {
+  type: "step" | "result" | "error";
+  key?: string;
+  label?: string;
+  status?: "running" | "done" | "error";
+  detail?: string;
+  data?: ReserveReviewResult;
+  message?: string;
+}
+
+export interface ReserveCaseDetail {
+  external_case_id: string;
+  reserve_row_id: number;
+  applicant: string;
+  respondent: string;
+  case_reason: string | null;
+  reserve_at: string | null;
+  reserve_time_limit: string | null;
+  detail: Record<string, unknown>;
+}
