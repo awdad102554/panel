@@ -188,6 +188,36 @@ def test_parse_result_checks_fallback_from_rule_refs():
     assert by_id["5"]["passed"] is True
 
 
+def test_parse_result_checks_passed_true_but_problem_note_downgraded():
+    # 模型把「有问题」的项标成通过(note 里列了缺陷),应降级为需人工核验(null)。
+    text = (
+        '{"conclusion":"补正","reason":"x","issues":[],"missing_materials":[],'
+        '"rule_refs":[],"checks":[{"rule_id":"1","rule_name":"被申请人明确性",'
+        '"passed":true,"note":"统一社会信用代码空缺、送达地址未填写,需人工核验工商登记信息"}]}'
+    )
+    r = rr.parse_result(text)
+    by_id = {c["rule_id"]: c for c in r["checks"]}
+    assert by_id["1"]["passed"] is None
+    assert "空缺" in by_id["1"]["note"]
+
+
+def test_parse_result_checks_passed_true_clean_note_kept():
+    text = (
+        '{"conclusion":"通过","reason":"x","issues":[],"missing_materials":[],'
+        '"rule_refs":[],"checks":[{"rule_id":"5","rule_name":"管辖",'
+        '"passed":true,"note":"实际工作地及被申请人住所地均在辖区,有管辖权"}]}'
+    )
+    r = rr.parse_result(text)
+    by_id = {c["rule_id"]: c for c in r["checks"]}
+    assert by_id["5"]["passed"] is True
+
+
+def test_note_has_problem_ignores_positive_phrases():
+    assert rr._note_has_problem("材料齐全,无需补充") is False
+    assert rr._note_has_problem("该项审查通过") is False
+    assert rr._note_has_problem("统一社会信用代码空缺,需人工核验") is True
+
+
 def test_failure_result_has_empty_checks():
     r = rr.failure_result("boom")
     assert r["conclusion"] == "审查失败"

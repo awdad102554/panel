@@ -51,9 +51,13 @@ RESERVE_REVIEW_SYSTEM_PROMPT = """你是劳动人事争议仲裁委员会的预�
 }
 
 # 注意
-- checks 必须覆盖全部 5 条规则;passed 为布尔值,不通过时在 note 里写明具体原因。
+- checks 必须覆盖全部 5 条规则;passed 三态取值:
+  true = 该项完全满足、零缺陷;
+  false = 有缺项/不一致/明显不满足;
+  null = 信息不全、无法自动确认、需人工核验。
+  硬约束:只要该项存在任何缺项、字段未填写/未上传、内容不一致或需人工核验,passed 一律不得为 true——不确定就填 null,严禁"note 里列了问题却判通过"。
 - 当事人字段中的 card_image_front/card_image_reverse 标记「身份证/证照照片 已上传/未上传」——「已上传」即视为该证件已提交,不要因看不到图片内容而判「缺少该证件」;不臆断图片内容。
-- 不确定能否核验的信息(如工商信息真伪)不要臆断,标记为"需人工核验"。
+- 不确定能否核验的信息(如工商信息真伪)不要臆断,该项 passed 填 null 并在 note 里写"需人工核验"。
 - 金额计算只核对请求内部的自洽性,不判断实体对错。
 - 驳回是严厉结论:证据不足支撑"明确驳回"时,降级为"补正"并在 reason 中说明。
 """
@@ -144,6 +148,18 @@ def _default_checks(rule_refs: list[str]) -> list[dict[str, Any]]:
     ]
 
 
+# note 命中任一关键词即视为「该项有缺陷/需人工核验」,用于兜底纠正模型「note 列了问题却 passed=true」的自相矛盾。
+_NOTE_PROBLEM_HINTS = (
+    "需人工核验", "待核验", "需核验", "需核实", "待核实", "待确认",
+    "空缺", "缺少", "缺失", "缺项", "未填写", "未上传", "未提供",
+    "无法证明", "不一致", "矛盾", "不符", "不完整", "不自洽",
+)
+
+
+def _note_has_problem(note: str) -> bool:
+    return any(h in note for h in _NOTE_PROBLEM_HINTS)
+
+
 def _normalize_checks(obj: dict[str, Any], rule_refs: list[str]) -> list[dict[str, Any]]:
     """归一化模型 checks 输出;缺失/为空时兜底,并补齐漏给的规则维度。"""
     raw = obj.get("checks")
@@ -183,6 +199,11 @@ def _normalize_checks(obj: dict[str, Any], rule_refs: list[str]) -> list[dict[st
                     "note": "模型未明确评估该项",
                 }
             )
+
+    # 兜底:note 里已列出缺陷/需人工核验,却仍被标「通过」的,降级为「需人工核验」,避免漏看问题项。
+    for c in out:
+        if c["passed"] is True and _note_has_problem(c["note"]):
+            c["passed"] = None
     return out
 
 
