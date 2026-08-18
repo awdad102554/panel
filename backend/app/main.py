@@ -11,6 +11,7 @@ from app.db.session import SessionLocal
 from app.integrations.case_system.client import CaseSystemError
 from app.services.internal_case_pause import backfill_paused_days
 from app.services.internal_case_sync import SYNC_LOCK, sync_internal_cases
+from app.services.reserve_review_runner import auto_review_pending
 from app.services.time_limits import get_time_limits
 from app.db.virtual import init_virtual_db
 
@@ -77,18 +78,41 @@ async def _pause_backfill_loop() -> None:
         await asyncio.sleep(wait_seconds)
 
 
+async def _auto_review_loop() -> None:
+    """后台自动审查新出现的待审核预约案件(尚无有效结论的)。
+
+    启动即跑一轮,之后按约 120 秒间隔;新案件要先经同步循环进快照,故端到端延迟
+    ≈ 同步间隔 + 本轮间隔。单轮异常不中断循环;同步/对账进行中跳过本轮。
+    """
+    while True:
+        if settings.case_system_enabled:
+            if SYNC_LOCK.locked():
+                logger.info("同步任务进行中,本轮预约自动审核跳过")
+            else:
+                try:
+                    async with SessionLocal() as db:
+                        reviewed = await auto_review_pending(db)
+                    if reviewed:
+                        logger.info("预约自动审核完成: %d 件", reviewed)
+                except Exception:
+                    logger.exception("预约自动审核异常,等待下一轮")
+        await asyncio.sleep(120)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_virtual_db()
     task = asyncio.create_task(_sync_loop())
     pause_task = asyncio.create_task(_pause_backfill_loop())
+    auto_task = asyncio.create_task(_auto_review_loop())
     try:
         yield
     finally:
         task.cancel()
         pause_task.cancel()
+        auto_task.cancel()
         # 等任务真正结束,避免关闭时循环正持 DB 会话 mid-sync 被打断告警。
-        await asyncio.gather(task, pause_task, return_exceptions=True)
+        await asyncio.gather(task, pause_task, auto_task, return_exceptions=True)
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)

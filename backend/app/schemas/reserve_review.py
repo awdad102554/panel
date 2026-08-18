@@ -15,6 +15,8 @@ class PendingReserveOut(BaseModel):
     reserve_at: str | None = None
     case_reason: str | None = None
     reserve_time_limit: str | None = None
+    has_review: bool = False
+    latest_conclusion: str | None = None
 
 
 class ReserveReviewOut(BaseModel):

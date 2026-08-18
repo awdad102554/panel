@@ -75,6 +75,12 @@ async function loadPending() {
   loadingList.value = true;
   try {
     pending.value = await reserveApi.listPendingReserve();
+    // 默认选中第一件并展示其最近一次审查内容,方便直接看到审核结果。
+    if (pending.value.length && !selectedId.value) {
+      const first = pending.value[0];
+      selectedId.value = first.external_case_id;
+      await loadLatestReview(first);
+    }
   } catch {
     ElMessage.error("待审核案件列表加载失败,请稍后重试");
   } finally {
@@ -82,9 +88,32 @@ async function loadPending() {
   }
 }
 
+async function loadLatestReview(row: PendingReserve) {
+  // 展示一件案件的最近一次审查留痕(非实时流式)。
+  showSnapshot.value = false;
+  const id = row.external_case_id;
+  if (!row.has_review) {
+    result.value = null;
+    resetSteps();
+    return;
+  }
+  try {
+    const r = await reserveApi.getLatestReview(id);
+    if (selectedId.value !== id) return; // 已切换到别的案件,丢弃过期结果
+    result.value = r;
+    // 已有留痕:流程步骤整体标记为已完成。
+    steps.value = BASE_STEPS.map((s) => ({ ...s, status: "done" as const, detail: "" }));
+  } catch {
+    if (selectedId.value !== id) return;
+    result.value = null;
+    resetSteps();
+  }
+}
+
 function selectCase(row: PendingReserve) {
   if (reviewing.value) return;
   selectedId.value = row.external_case_id;
+  loadLatestReview(row);
 }
 
 async function startReview(row: PendingReserve) {
@@ -97,6 +126,15 @@ async function startReview(row: PendingReserve) {
   try {
     const final = await reserveApi.reviewReserve(row.external_case_id, applyEvent);
     result.value = final;
+    // 审查完成即标记该案件已有结果,按钮即时翻转为「重新审核」,无需刷新列表。
+    const idx = pending.value.findIndex((p) => p.external_case_id === row.external_case_id);
+    if (idx !== -1) {
+      pending.value[idx] = {
+        ...pending.value[idx],
+        has_review: true,
+        latest_conclusion: final.conclusion,
+      };
+    }
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : "审查失败,请稍后重试");
   } finally {
@@ -128,6 +166,10 @@ function timeLimitType(t: string): "danger" | "warning" | "info" {
   if (t.startsWith("超期")) return "danger";
   if (t.endsWith("天")) return "warning";
   return "info";
+}
+
+function conclusionTag(c: ReviewConclusion | null): "success" | "warning" | "danger" | "info" {
+  return c ? CONCLUSION_META[c].tag : "info";
 }
 
 onMounted(loadPending);
@@ -168,6 +210,9 @@ onMounted(loadPending);
               </div>
               <div class="case-meta">
                 <el-tag v-if="row.case_reason" size="small" type="info">{{ row.case_reason }}</el-tag>
+                <el-tag v-if="row.latest_conclusion" size="small" :type="conclusionTag(row.latest_conclusion)">
+                  {{ row.latest_conclusion }}
+                </el-tag>
                 <span class="meta-text">{{ row.reserve_at?.slice(0, 10) ?? "-" }}</span>
                 <el-tag v-if="row.reserve_time_limit" size="small" :type="timeLimitType(row.reserve_time_limit)">
                   {{ row.reserve_time_limit }}
@@ -180,7 +225,7 @@ onMounted(loadPending);
               :loading="reviewing && row.external_case_id === selectedId"
               @click.stop="startReview(row)"
             >
-              审查
+              {{ row.has_review ? "重新审核" : "审查" }}
             </el-button>
           </div>
         </div>

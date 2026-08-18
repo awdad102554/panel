@@ -227,6 +227,10 @@ export interface PendingReserve {
   reserve_at: string | null;
   case_reason: string | null;
   reserve_time_limit: string | null;
+  /** 是否已有审查留痕(有则按钮显示「重新审核」) */
+  has_review: boolean;
+  /** 最近一次审查结论(通过/补正/驳回/审查失败),无留痕为 null */
+  latest_conclusion: ReviewConclusion | null;
 }
 
 export type ReviewConclusion = "通过" | "补正" | "驳回" | "审查失败";

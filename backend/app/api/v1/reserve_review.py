@@ -28,6 +28,7 @@ from app.models.user import User
 from app.repositories import ai_model_repository
 from app.schemas.reserve_review import PendingReserveOut, ReserveCaseDetailOut, ReserveReviewOut
 from app.services import reserve_review as review_service
+from app.services import reserve_review_runner as runner
 
 router = APIRouter(prefix="/reserve-reviews", tags=["reserve-review"])
 logger = logging.getLogger(__name__)
@@ -51,27 +52,18 @@ async def _save_review(
 ) -> ReserveAIReview:
     """落库一次审查留痕,返回已刷新(含 id/created_at)的 ORM 行。"""
     async with SessionLocal() as db:
-        row = ReserveAIReview(
+        return await runner.save_review(
+            db=db,
             external_case_id=external_case_id,
             reserve_row_id=reserve_row_id,
             applicant=applicant,
             respondent=respondent,
             case_reason=case_reason,
-            conclusion=result["conclusion"],
-            reason=result["reason"],
-            issues=result["issues"],
-            missing_materials=result["missing_materials"],
-            rule_refs=result["rule_refs"],
-            checks=result.get("checks", []),
+            result=result,
+            snapshot=snapshot,
             model_name=model_name,
-            case_snapshot=snapshot,
-            raw_result=result,
             created_by=created_by,
         )
-        db.add(row)
-        await db.commit()
-        await db.refresh(row)
-        return row
 
 
 @router.get("/pending", response_model=list[PendingReserveOut])
@@ -79,16 +71,11 @@ async def list_pending_reserves(
     db: AsyncSession = Depends(get_db),
     _user=Depends(require_permission(Action.VIEW)),
 ) -> list[PendingReserveOut]:
-    rows = (
-        await db.execute(
-            select(InternalCaseTracking).where(InternalCaseTracking.stage == InternalStage.RESERVE)
-        )
-    ).scalars().all()
+    rows = await runner.pending_reserve_rows(db)
+    latest = await runner.latest_reviews(db)
     out: list[PendingReserveOut] = []
     for row in rows:
         p = row.raw_payload or {}
-        if p.get("status") != 0:
-            continue
         cases = p.get("cases") if isinstance(p.get("cases"), dict) else {}
         out.append(
             PendingReserveOut(
@@ -99,6 +86,8 @@ async def list_pending_reserves(
                 reserve_at=p.get("reserve_at") or p.get("submit_at"),
                 case_reason=cases.get("case_reason"),
                 reserve_time_limit=p.get("reserve_time_limit"),
+                has_review=row.external_case_id in latest,
+                latest_conclusion=latest.get(row.external_case_id),
             )
         )
     out.sort(key=lambda x: x.reserve_at or "", reverse=True)
