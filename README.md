@@ -17,6 +17,7 @@
 - **预登记案件**：暂不录入内网的案件登记跟踪，独立 SQLite 库存储，支持查自然人/查企业（内网数据共享接口）、生成仲裁申请书，并可**一键保存到内网收件**（`POST /virtual-cases/{id}/submit`，自动组装 receive/add 复杂请求体）。
 - **案件工作台**：案件画像 + 阶段工作区 + AI 助手 + 时间线四区块组合；AI 能力层为可插拔接口（当前 mock 实现，落库待人工确认）。
 - **AI 模型管理**：配置供应商/Base URL/密钥/模型名/温度/最大输出 token；最大输出按主流模型预设自动填入（`utils/modelPresets.ts`），供真实 LLM Provider 发请求使用。
+- **天眼查**：接入天眼查 MCP（`https://mcp.tianyancha.com/mcp`），按企业名称/统一社会信用代码查工商基本信息与**企业详情**（联系电话/邮箱/官网/地址/经营范围等），API Key 可在页面配置（存 `system_settings`，也可走 `.env`）。见 `docs/architecture.md`「天眼查」。
 
 > 系统已免登录（内网环境），打开即主页，写操作留痕为 admin。详见 `docs/architecture.md`「免登录」一节。
 

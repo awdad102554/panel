@@ -49,6 +49,11 @@ const router = createRouter({
           name: "ai-reserve-review",
           component: () => import("@/views/AiReserveReviewView.vue"),
         },
+        {
+          path: "tianyancha",
+          name: "tianyancha",
+          component: () => import("@/views/TianyanchaView.vue"),
+        },
       ],
     },
     {

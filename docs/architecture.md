@@ -7,7 +7,7 @@
 - `backend/`：FastAPI 应用，按表现层→业务层→AI 服务层→基础服务层→数据层分层。
 - `frontend/`：Vue3 + Vite + TypeScript 单页应用，通过 `/api` 反向代理调用后端。
 
-案件总览驾驶舱、内网案件监控与同步、统计分析、时限设置、预登记案件、AI 预约审查等模块已上线运行；案件工作台的 AI 能力层仍为可插拔的 mock 实现，AI 预约审查已接入真实 LLM（OpenAI 兼容，见下方「AI 预约审查」）。
+案件总览驾驶舱、内网案件监控与同步、统计分析、时限设置、预登记案件、天眼查、AI 预约审查等模块已上线运行；案件工作台的 AI 能力层仍为可插拔的 mock 实现，AI 预约审查已接入真实 LLM（OpenAI 兼容，见下方「AI 预约审查」）。
 
 ## 后端分层
 
@@ -29,9 +29,9 @@
 - `app/schemas/`：Pydantic 请求/响应模型，按模块拆分，与 ORM 模型解耦。
 - `app/repositories/`：纯数据访问（如 `case_repository.py`），不做状态校验。
 - `app/services/`：业务规则，例如 `case_lifecycle.py` 的状态机、`timeline_service.py` 的统一时间线写入、`internal_case_sync.py` 的内网案件全量同步、`internal_case_urgency.py` 的紧急度纯函数。
-- `app/integrations/`：外部系统对接，目前只有 `case_system/`（内网案件系统 10.96.10.78:8080 的登录/token 缓存客户端与统计服务）。
+- `app/integrations/`：外部系统对接，`case_system/`（内网案件系统 10.96.10.78:8080 的登录/token 缓存客户端与统计服务）+ `tianyancha/`（天眼查 MCP 客户端，裸 httpx 自实现 Streamable HTTP + JSON-RPC 2.0）。
 - `app/ai/`：AI 能力层，`base.py` 定义统一输出结构 `AIResult` 与 `AICapability` 抽象基类；`client.py` 封装 LLM Provider（当前为 `MockLLMClient`，未来接入真实模型只需替换该文件，上层能力类和业务代码不受影响）。另新增 `llm.py` 提供真实 OpenAI 兼容的 `chat_completion`（`POST {base_url}/chat/completions`、`response_format=json_object`，失败时把响应体里的 `error.message` 抠出抛 `LLMCallError`，便于排障），仅 AI 预约审查使用，案件工作台 mock 不受影响；`vision.py` 拉取内网材料图片/PDF 并编码为 OpenAI 兼容的 `image_url` data URI（PDF 用系统 Ghostscript 转 PNG，零第三方依赖，供视觉模型看图核对）。模型管理（`ai_models` 路由 + `AIModelConfig` 表）持久化供应商/base_url/密钥/模型名/temperature/`max_tokens`（单次最大输出 token，前端按主流模型上限预设自动填入，见 `utils/modelPresets.ts`，供真实 Provider 发请求时使用）与 `supports_vision`（是否支持图片输入，预约审查据此切换视觉/纯文本流程）。
-- `app/api/v1/`：路由层，按模块拆分（`auth`/`dashboard`/`cases`/`case_portrait`/`timeline`/`ai`/`ai_models`/`documents`/`service_delivery`/`stats`/`internal_cases`/`settings`/`virtual_cases`/`reserve_review`），统一经 `router.py` 汇总。
+- `app/api/v1/`：路由层，按模块拆分（`auth`/`dashboard`/`cases`/`case_portrait`/`timeline`/`ai`/`ai_models`/`documents`/`service_delivery`/`stats`/`internal_cases`/`settings`/`virtual_cases`/`reserve_review`/`tianyancha`），统一经 `router.py` 汇总。
 
 ## 关键设计
 
@@ -47,6 +47,7 @@
 - **统计分析页**：`GET /stats/overview` 与总览同源（内网同步快照 + `compute_urgency`），产出 KPI（累计收件/立案、在办、已结案、调解率、平均审理时长、当前超期）及各图表聚合；页面展示 KPI 行 + 仲裁员办案量 + 审理时长分桶（法定审限 45 天：≤45/46-60/61-90/>90）两张图（趋势、结案方式与总览重复，只在总览展示），图表钻取复用 `/dashboard/chart-cases`（含 `arbitrator`、`duration_bucket` 两个维度），明细弹窗为通用组件 `components/InternalCaseDialog.vue`（总览卡片/图表、统计页共用）。
 - **案件总览卡片口径**：`/dashboard/summary` 全部从内网同步快照聚合（`dashboard.py::_snapshot_stats`，开庭场次实时取庭审日历）。卡片：时效提醒（已超期+紧急+临近）、待办案件（收件环节/线上预约待审核、未立案，2026-08-17 起并入预约待审核；注意与"时效提醒"含义不同，勿混用）、在办案件（立案未结案）、待调解、已开庭待裁决、中止过久、今日立案、今日结案、近日开庭。紧急度与办案进度监控页共用同一套 `compute_urgency`，两页数字一致。除"近日开庭"外的卡片点开走 `GET /dashboard/card-cases?key=...`，明细过滤与卡片计数共用 `_row_in_card` 判定。总览年度数据区为 `components/YearlyStatsPanel.vue`，下方四张图表走 `GET /dashboard/charts`；前端用 echarts 渲染（`components/DashboardCharts.vue`）。
 - **AI 预约审查**（2026-08-17 上线）：对线上预约待审核案件（快照 `stage=reserve` 且 `raw_payload.status==0`）**逐件**自动审查，产出「通过/补正/驳回」初筛建议，**结论仅展示、不写回内网审批**（人机分工）。审查规则提示词取自 `docs/reserve-ai-review-prompt.md`（基于 32 条历史驳回记录总结的审查规则 1-5 + 三结论 + JSON 输出，见 `app/services/reserve_review.py` 的 `RESERVE_REVIEW_SYSTEM_PROMPT`）。流程：`GET /reserve-reviews/pending` 列待审核案件 → `POST /reserve-reviews/{external_case_id}/review` 用 `StreamingResponse`（`application/x-ndjson`，`X-Accel-Buffering: no`）逐步 yield 四步事件（fetch_detail 抓预约详情 → build_prompt 组装提示词+案件结构化摘要 → call_llm 调启用模型 → parse 解析结论），驱动前端动态时间线；每步可失败降级为「审查失败」结论。审查留痕落 `reserve_ai_reviews` 表（结论/问题点/缺材料/命中规则/逐项 `checks`/送入模型的 `case_snapshot`/`raw_result`，供校准回溯）。真实 LLM 走 `app/ai/llm.py`，复用 `ai_models` 已启用模型（当前 deepseek-v4-pro）；无启用模型/调用失败/输出非法时兜底「审查失败」不伪造结论。`GET /reserve-reviews/{id}` 取该案件最近一次留痕；`GET /reserve-reviews/{id}/detail` 实时拉内网详情并结构化返回（供右上角「查看案件」弹窗）。前端 `AiReserveReviewView.vue`：左栏待审核列表 + 右栏「审查流程动态时间线 + 结论卡片（通过=绿/补正=琥珀/驳回=红/失败=灰）+ **逐项审查清单**（5 条规则逐项通过/不通过/需核验，模型输出 `checks`，缺失时按 `rule_refs` 兜底；`passed` 为三态 true=通过 / false=不通过 / null=需人工核验，当模型在 note 里列了缺陷却仍标「通过」时，后端按 `_note_has_problem` 关键词兜底降级为「需人工核验」，避免漏看问题项）+ 可折叠案件摘要」，用 `fetch` + `ReadableStream` 消费 NDJSON 逐事件推进；页面右上角「查看案件」按钮弹 `el-dialog`，用通用递归组件 `ReserveDetailTree.vue` 渲染结构化案件详情（当事人/请求/事实理由/证据材料/证件照片状态）。案件摘要中 0/1 布尔字段（是否签订劳动合同/是否缴纳社保/是否涉及劳务派遣/是否主要争议）由 `build_case_payload` 统一归一为「是/否」再展示给模型与弹窗（`_yesno`，空值留空前端显示「—」），避免 `1/0` 歧义。2026-08-18 起新预约案件**自动审核一次**：`app/services/reserve_review_runner.py` 抽出非流式编排 `run_review`（复用 `reserve_review` 纯函数：抓详情→组装→读启用模型→调 LLM→解析→落库）与 `auto_review_pending`（仅对「历史无有效结论」的案件逐件审查，单案失败不中断整轮），供手动流式端点与后台自动审核复用；`app/main.py` 新增第三个后台循环 `_auto_review_loop`（约 120s，`case_system_enabled` 且同步锁空闲时跑，端到端延迟 ≈ 同步间隔 + 120s）；`GET /reserve-reviews/pending` 每案附 `has_review` / `latest_conclusion`，前端按钮由「审查」翻转为「重新审核」并显示最近结论标签，选中/首次加载时自动拉取并展示最近一次审查留痕。自动审核 `created_by="系统"`，`is_valid_conclusion` 以「通过/补正/驳回」判已审出结果，仅「审查失败」下一轮重试。2026-08-18 起新增**人工审核结果**：AI 在同一次调用里自动归类「同意/不同意」及 8 选 1 不同意理由（`decision`/`reject_reason`/`reject_detail`，见 `_normalize_decision`——decision 由结论确定性派生、不信任模型自相矛盾的 decision 字段；理由漏给/给错时兜底 补正→请补正、驳回→其他），前端结论卡片下方「审核结果」卡片由工作人员编辑确认后落本地 `reserve_review_decisions` 表（`GET/POST /reserve-reviews/{id}/decision`，追加式留痕、最新一条生效、`created_by=当前用户`；**暂不提交内网**，端点内留 `TODO(内网提交)`）。2026-08-19 起支持**视觉审查**：`AIModelConfig.supports_vision` 开启且启用模型支持图片时，`run_review` 走 `collect_material_images`（只收集身份证/证照正反面照片，证据材料仍只看字段）+ `fetch_material_images`（拉取失败/超限/PDF 转图失败静默跳过）+ `build_vision_messages`（system 追加 `VISION_INSTRUCTIONS` 图片核对指令、user 内容为「文本摘要 + 多张 image_url」）；PDF 经 Ghostscript 转 PNG 后送审（`word_url` 里的 PDF 当前仅作测试）；未开启则维持原纯文本流程（只看照片上传标记 + 字段）。
+- **天眼查**（2026-08-19 上线）：接入天眼查 MCP（`https://mcp.tianyancha.com/mcp`），后端作为 MCP 客户端用裸 httpx 自实现 Streamable HTTP + JSON-RPC 2.0（`app/integrations/tianyancha/client.py`：协议版本协商 2025-06-18→2025-03-26→2024-11-05、`Mcp-Session-Id` 回带、SSE/JSON 两种响应解析、工具列表进程内缓存），鉴权用请求头 `Authorization: Bearer <key>`。编排在 `app/services/tianyancha_lookup.py`：`search_company` 调 `search_companies`（入参 `query`）解析 Markdown 候选表；`get_company_details` 调 `get_company_basic_profile` 解析基础画像为「概览字段（固定顺序白名单，丢弃分页/冗余/空值，`profile` 改名企业简介）+ 明细表（联系电话明细/曾用名明细等，笼统标题补二级章节名）」。API Key 可页面配置（存 `system_settings`，`services/tianyancha_settings.py`，`GET/PUT /tianyancha/config` 返回脱敏后四位；换 key 动态重建客户端并关闭旧连接池），也回落 `.env` 的 `TIANYANCHA_API_KEY`；鉴权失败（HTTP 401/403 或错误消息命中鉴权关键词）抛 `TianyanchaAuthError` → 接口 401「API Key 无效」，其余 MCP 异常 502、未配置/未命中 404。接口：`GET /tianyancha/lookup/company?name=`（候选列表）、`GET /tianyancha/lookup/details?name=`（企业详情，按需扣 1 次额度）、`GET /tianyancha/tools`（调试辅助）。前端 `TianyanchaView.vue`：候选列表按「精确匹配（公司名称/信用代码匹配）vs 关联候选（股东/历史等，折叠）」分块，每条精确匹配行有「查看详情」按钮点查该企业画像（el-descriptions 单列固定顺序）。数据来自天眼查 MCP，非内网数据共享接口。
 - **内网案件监控**：`main.py` 的 lifespan 里跑 `asyncio` 后台循环，按 `case_sync_interval_minutes`（默认 60 分钟，时限设置页可改）做**轻量同步**——内网接口实测支持筛选（`receive?status=0` 只回待审核、`handle?status=未结案` 只回在办），已结案不再变动的 2100+ 件历史案件不重复拉取；另按 `application_date` 补抓今天+昨天的新收件/新立案（捕获"快速流转""立案当天即结案"的案件）；对"上轮还在办、本轮消失"的案件按案号单点补拉（捕获结案/退回翻转；receive 已处理的会再探一次 handle，防快照冻结在收件环节）；**receive 无案号案件**（"保存未审批"的收件案号字段是哈希串，案号探测无效）退到"申请日期 ±1 天 + case_id"定点探测：找到=已处理/已修改（更新快照，如保存后正式提交获得正式收字号），窗口内找不到=内网已删除（删除快照行，误删可用全量同步恢复），探测失败保留原值下轮重试；**reserve 消失案件**（轻量对 reserve 是全量拉取、无筛选，2026-08-17 起）拉取成功即判定"已审核离开预约环节（转收件，内网可能另建新 case_id）或内网已删除"，预约无案号不做探测、直接删除快照（转收件后由 receive 侧同步捕获），拉取失败保留原值下轮重试。同一案件多环节归并按 reserve→receive→handle 优先级取最靠后环节（不靠写入顺序）。`phase_entered_at` 锚点在环节/子状态/**中止标志**任一变化时重置，"已中止XX天"从进入中止算起。- **一致性校验**：`POST /internal-cases/verify-consistency` 全量只读对账（比对内网全量与快照的环节/子状态/结案字段，receive/reserve 环节加比内网 status——"保存未审批"被退回/处理、预约待审核被退回(0→2)只有 status 变化；不修正数据），结果落库到 `sync_verification_reports`（统计 + 完整差异明细，供排查轻量同步问题），`GET /internal-cases/verify-reports` 查历史；监控页"一致性校验"按钮触发。全量翻页仅作手工恢复手段（`POST /internal-cases/sync?full=true`），日常不跑；**全量模式会顺手清理幽灵快照**（reserve/receive/handle 全量历史比对，快照多出=内网已删除，删除并连带清理同 id 人工时效覆盖；任一环节拉取失败则跳过清理防误删）。快照表 `internal_case_trackings` 按 `external_case_id` upsert（receive/reserve 返回未过滤列表；reserve 审核通过即离开列表）。紧急度不落库，读取时由 `internal_case_urgency.compute_urgency` 按"人工时效覆盖 > 环节原生倒计时/超期信号 > 进入环节天数估算"实时计算；已结案/已归档为终态，优先于人工覆盖，直接隐藏（2026-07-30 起取消结案后的送达跟踪，结案即最后阶段）；reserve status 枚举：0 待审核（工作人员待办，优先按原生 `reserve_time_limit` 倒计时分档、与收件同一套临近/紧急阈值，拿不到按进入天数估算）、1/3 通过不告警、2/4 不通过（退回申请人补正）单列 rejected 不算超期、默认隐藏；单案件时效可用 `/override` 人工覆盖（终态案件拒绝设置）。
 - **中止天数回填**：列表接口不提供中止/恢复时间，但案件详情接口（`POST case/caseData`，与 InfoWeb 立案详情同源）返回 `review_matter` 审理事项记录，`services/internal_case_pause.py` 用"中止审理/恢复审理"的审批通过时间配对算出累计中止天数，由 `_pause_backfill_loop` 对已结案案件增量回填、对在办案件每轮重算（暂停仍在累计，ongoing 区间计到当天）；统计页/钻取的审理时长 = 结案日 - 立案日 - 中止天数。**超审限判定**（`_is_over_statutory_limit`）：经过天数 > 45 天法定审限 + `extension_days` 批准延期；经过天数从立案日起算，若 `review_matter` 中有变更/增加仲裁请求、反申请、追加当事人（审限依法重新起算）则从最近一次重启日（`clock_reset_at`）起算且只扣重启后中止（`paused_after_reset_days`）；结案案件算到结案日，在办算到今天。统计页 KPI 有"在办超审限/结案超审限"，钻取走 `/dashboard/chart-cases?kind=over_limit_open|over_limit_closed`。
 
@@ -55,9 +56,9 @@
 ```text
 frontend/src/
 ├── main.ts / App.vue         应用入口
-├── router/index.ts           路由：/dashboard /priority /cases/:id /stats /time-limits /virtual-cases /models /ai-reserve-review（免登录，无 /login）
+├── router/index.ts           路由：/dashboard /priority /cases/:id /stats /time-limits /virtual-cases /models /ai-reserve-review /tianyancha（免登录，无 /login）
 ├── stores/                   Pinia：case.ts（案件工作台状态）
-├── api/                      axios 封装，按模块拆分（auth/dashboard/case/internalCase/ai/aiModel/stats/settings/virtualCases/reserveReview）
+├── api/                      axios 封装，按模块拆分（auth/dashboard/case/internalCase/ai/aiModel/stats/settings/virtualCases/reserveReview/tianyancha）
 ├── layouts/MainLayout.vue    顶部信息栏 + 侧边导航
 ├── views/
 │   ├── DashboardView.vue     首页驾驶舱：待办案件/近日开庭/风险提醒等统计卡片（近日开庭卡片可点开看明细）
@@ -67,7 +68,8 @@ frontend/src/
 │   ├── SettingsView.vue      时限设置
 │   ├── VirtualCasesView.vue  预登记案件
 │   ├── ModelManageView.vue   AI 模型配置管理
-│   └── AiReserveReviewView.vue  AI 预约审查（待审核列表 + 动态审查流程 + 结论卡片）
+│   ├── AiReserveReviewView.vue  AI 预约审查（待审核列表 + 动态审查流程 + 结论卡片）
+│   └── TianyanchaView.vue    天眼查（查企业候选列表 + 企业详情）
 └── components/
     ├── DashboardCharts.vue   总览四张图表（echarts）
     ├── InternalCaseDialog.vue 案件明细弹窗（总览卡片/图表、统计页共用）
@@ -110,7 +112,7 @@ npm run dev
 
 ## 测试和验证
 
-- 后端：`pytest backend/tests`（131 个用例，纯函数/内存测试，用假字典目录、不打内网），按模块覆盖：
+- 后端：`pytest backend/tests`（154 个用例，纯函数/内存测试，用假字典目录、不打内网/外网），按模块覆盖：
   - `test_health.py` 健康检查；
   - `test_case_submit.py` / `test_application_doc.py` 预登记提交载荷与仲裁申请书拼接（请求文本/金额/intro/fact_reason 四段式、多申请人编号、多被申请人"各被申请人共同"等）；
   - `test_complex_virtual_case.py` 复杂预登记案件全链路回归（多申请人 + 多被申请人 + 三类代理人 + 四种请求类型，验证 build_payload / build_draft / 申请书 parties/agents/requests/facts）；
@@ -119,5 +121,6 @@ npm run dev
   - `test_reserve_review_decision.py` 人工审核结果 schema 校验（不同意缺理由/需补填未填 422、同意清空理由）；
   - `test_vision.py` 视觉辅助（路径归一化、Ghostscript PDF→PNG 转图、`build_vision_messages` 多模态消息形状）；
   - `test_internal_case_urgency.py` / `test_internal_case_refetch.py` / `test_internal_case_verify.py` / `test_internal_case_pause.py` / `test_virtual_case_urgency.py` 内网案件紧急度分档、消失案件补拉、一致性对账、中止天数回填与预登记紧急度。
+  - `test_tianyancha.py` 天眼查 MCP 集成（SSE 解析、工具挑选、入参构造、候选表/画像 Markdown 解析与字段归一化、API Key 存取脱敏、鉴权错误识别）。
   - 亦可手工跑一遍最小闭环——创建案件 → 触发"收件预审 AI" → 确认输出 → 查看时间线，验证各层是否正确联动。
 - 前端：`npm run build`（`vue-tsc` 类型检查 + Vite 构建，产物即 nginx 服务目录）；`npm run dev` 后在浏览器中人工走查案件总览、办案进度监控、统计分析、时限设置等页面。

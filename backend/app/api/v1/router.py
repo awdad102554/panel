@@ -13,6 +13,7 @@ from app.api.v1 import (
     service_delivery,
     settings,
     stats,
+    tianyancha,
     timeline,
     virtual_cases,
 )
@@ -32,3 +33,4 @@ api_router.include_router(service_delivery.router)
 api_router.include_router(stats.router)
 api_router.include_router(settings.router)
 api_router.include_router(virtual_cases.router)
+api_router.include_router(tianyancha.router)

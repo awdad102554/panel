@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     case_system_timeout: int = 30
     case_system_session_hours: int = 10
 
+    # 天眼查 MCP(https://mcp.tianyancha.com/mcp,Streamable HTTP + JSON-RPC)。
+    # 鉴权用 API Key:请求头 Authorization: Bearer <key>。敏感 key 默认空,
+    # 真实值必须由 backend/.env 提供(TIANYANCHA_API_KEY),缺失时接口返回"未配置"。
+    tianyancha_enabled: bool = True
+    tianyancha_base_url: str = "https://mcp.tianyancha.com/mcp"
+    tianyancha_api_key: str = ""
+    tianyancha_timeout: int = 30
+
     # 审限占位值(天):真实业务规则待用户后续明确,当前用户已确认"先用占位符/随意设置"。
     # 用于案件未手动填写 statute_deadline 时,从 filed_date 起算的默认审限天数。
     # TODO: 替换为正式的审限业务规则后删除此占位注释。
