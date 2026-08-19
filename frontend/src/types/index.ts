@@ -232,6 +232,8 @@ export interface PendingReserve {
   has_review: boolean;
   /** 最近一次审查结论(通过/补正/驳回/审查失败),无留痕为 null */
   latest_conclusion: ReviewConclusion | null;
+  /** 是否已提交内网审核(不可重复提交) */
+  submitted: boolean;
 }
 
 export type ReviewConclusion = "通过" | "补正" | "驳回" | "审查失败";
@@ -246,6 +248,11 @@ export interface ReserveReviewDecision {
   reject_detail: string | null;
   created_at: string;
   created_by: string;
+  /** 提交内网留痕;为空表示尚未提交(仍可编辑重试) */
+  submitted_at: string | null;
+  submitted_by: string | null;
+  internal_status: number | null;
+  internal_reason: string | null;
 }
 
 export interface ReviewCheck {

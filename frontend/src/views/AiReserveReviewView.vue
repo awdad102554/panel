@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { Check, Close, Document, View, WarningFilled } from "@element-plus/icons-vue";
-import { ElMessage } from "element-plus";
+import { ElMessage, ElMessageBox } from "element-plus";
 import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import * as reserveApi from "@/api/reserveReview";
@@ -64,6 +64,9 @@ const decisionForm = reactive({
 const needsDetail = computed(
   () => REJECT_REASONS.some((r) => r.label === decisionForm.rejectReason && r.needDetail),
 );
+
+// 是否已提交内网审批(submitted_at 非空);已提交则不可再编辑/重提。
+const isSubmitted = computed(() => savedDecision.value?.submitted_at != null);
 
 // 切回「同意」时清空理由与补充说明,避免残留脏数据。
 watch(
@@ -156,6 +159,8 @@ function applyDecisionToForm(d: ReserveReviewDecision) {
 
 function applyPrediction(pred: ReserveReviewResult | null) {
   // AI 预测的审核口径预填进表单,供人工编辑确认;无预测(审查失败)则归零。
+  // 已提交内网后表单锁定,不再被 AI 预测覆盖(重新审核不应顶掉已提交的审核口径)。
+  if (isSubmitted.value) return;
   if (pred?.decision === "同意" || pred?.decision === "不同意") {
     decisionForm.decision = pred.decision;
     decisionForm.rejectReason = pred.reject_reason;
@@ -214,8 +219,15 @@ async function startReview(row: PendingReserve) {
   }
 }
 
+// 预览将提交内网的 reason(与后端 compose_preaudit_payload 口径一致,仅作确认展示)。
+function composeReasonPreview(): string {
+  if (decisionForm.decision === "同意") return "";
+  if (needsDetail.value) return `${decisionForm.rejectReason}:${decisionForm.rejectDetail.trim()}`;
+  return decisionForm.rejectReason ?? "其他";
+}
+
 async function submitDecision() {
-  if (!selectedId.value || decisionSaving.value) return;
+  if (!selectedId.value || decisionSaving.value || isSubmitted.value) return;
   if (decisionForm.decision === "不同意") {
     if (!decisionForm.rejectReason) {
       ElMessage.warning("请选择不同意理由");
@@ -226,6 +238,17 @@ async function submitDecision() {
       return;
     }
   }
+  const reasonPreview = composeReasonPreview();
+  try {
+    await ElMessageBox.confirm(
+      `确认将本案件的审核结果提交内网审批？提交后不可撤回。结论：${decisionForm.decision}` +
+        (reasonPreview ? `；理由：${reasonPreview}` : ""),
+      "提交内网审批",
+      { confirmButtonText: "确认提交", cancelButtonText: "取消", type: "warning" },
+    );
+  } catch {
+    return; // 用户取消
+  }
   decisionSaving.value = true;
   try {
     const d = await reserveApi.submitReviewDecision(selectedId.value, {
@@ -235,9 +258,12 @@ async function submitDecision() {
     });
     savedDecision.value = d;
     applyDecisionToForm(d);
-    ElMessage.success("审核结果已保存");
+    // 左栏即时标记「已提交」,无需刷新列表。
+    const idx = pending.value.findIndex((p) => p.external_case_id === selectedId.value);
+    if (idx !== -1) pending.value[idx] = { ...pending.value[idx], submitted: true };
+    ElMessage.success("审核结果已提交内网");
   } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : "审核结果保存失败,请稍后重试");
+    ElMessage.error(e instanceof Error ? e.message : "审核结果提交失败,请稍后重试");
   } finally {
     decisionSaving.value = false;
   }
@@ -281,7 +307,7 @@ onMounted(loadPending);
     <div class="page-header">
       <h2>AI 预约审查</h2>
       <p class="page-subtitle">
-        对线上预约待审核案件自动审查，产出「通过 / 补正 / 驳回」初筛建议；结论仅供工作人员参考，不写回内网审批。
+        对线上预约待审核案件自动审查，产出「通过 / 补正 / 驳回」初筛建议；结论仅供工作人员参考，确认「审核结果」后将提交内网审批。
       </p>
     </div>
 
@@ -314,6 +340,7 @@ onMounted(loadPending);
                 <el-tag v-if="row.latest_conclusion" size="small" :type="conclusionTag(row.latest_conclusion)">
                   {{ row.latest_conclusion }}
                 </el-tag>
+                <el-tag v-if="row.submitted" size="small" type="success" effect="plain">已提交</el-tag>
                 <span class="meta-text">{{ row.reserve_at?.slice(0, 10) ?? "-" }}</span>
                 <el-tag v-if="row.reserve_time_limit" size="small" :type="timeLimitType(row.reserve_time_limit)">
                   {{ row.reserve_time_limit }}
@@ -462,9 +489,10 @@ onMounted(loadPending);
               >
                 {{ savedDecision.decision }}
               </el-tag>
+              <el-tag v-if="isSubmitted" size="small" type="success" effect="dark">已提交内网</el-tag>
             </div>
 
-            <el-radio-group v-model="decisionForm.decision" class="decision-radio">
+            <el-radio-group v-model="decisionForm.decision" class="decision-radio" :disabled="isSubmitted">
               <el-radio value="同意" :border="true">同意</el-radio>
               <el-radio value="不同意" :border="true">不同意</el-radio>
             </el-radio-group>
@@ -472,7 +500,7 @@ onMounted(loadPending);
             <template v-if="decisionForm.decision === '不同意'">
               <div class="reason-group">
                 <div class="reason-title">不同意理由（单选）</div>
-                <el-radio-group v-model="decisionForm.rejectReason" class="reason-list">
+                <el-radio-group v-model="decisionForm.rejectReason" class="reason-list" :disabled="isSubmitted">
                   <el-radio v-for="r in REJECT_REASONS" :key="r.label" :value="r.label">
                     {{ r.label }}
                   </el-radio>
@@ -487,16 +515,29 @@ onMounted(loadPending);
                 show-word-limit
                 placeholder="请填写具体信息"
                 class="reason-detail"
+                :disabled="isSubmitted"
               />
             </template>
 
             <div class="decision-actions">
-              <el-button type="primary" :loading="decisionSaving" @click="submitDecision">
+              <el-button
+                v-if="!isSubmitted"
+                type="primary"
+                :loading="decisionSaving"
+                @click="submitDecision"
+              >
                 提交审核结果
               </el-button>
+              <el-button v-else type="success" plain disabled>已提交</el-button>
               <span v-if="savedDecision" class="decision-meta">
-                {{ savedDecision.created_at?.slice(0, 19).replace("T", " ") }} ·
-                {{ savedDecision.created_by }}
+                <template v-if="isSubmitted">
+                  {{ savedDecision.submitted_at?.slice(0, 19).replace("T", " ") }} 提交内网 ·
+                  {{ savedDecision.submitted_by }}
+                </template>
+                <template v-else>
+                  {{ savedDecision.created_at?.slice(0, 19).replace("T", " ") }} ·
+                  {{ savedDecision.created_by }}
+                </template>
               </span>
             </div>
           </div>

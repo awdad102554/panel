@@ -26,6 +26,7 @@ const config = ref<TianyanchaConfig>({
 });
 const apiKeyInput = ref("");
 const savingKey = ref(false);
+const editingKey = ref(false);
 
 async function loadConfig() {
   try {
@@ -36,12 +37,23 @@ async function loadConfig() {
   }
 }
 
+function startEdit() {
+  apiKeyInput.value = "";
+  editingKey.value = true;
+}
+
+function cancelEdit() {
+  apiKeyInput.value = "";
+  editingKey.value = false;
+}
+
 async function saveKey() {
   savingKey.value = true;
   try {
     const body = await updateTianyanchaConfig(apiKeyInput.value.trim());
     if (body?.data) config.value = body.data;
     apiKeyInput.value = "";
+    editingKey.value = false;
     ElMessage.success("API Key 已保存");
   } catch (err) {
     const detail = (err as { response?: { data?: { detail?: string } } })?.response
@@ -153,22 +165,30 @@ async function loadDetails(name: string) {
             <el-tag v-else size="small" type="warning" effect="plain">未配置</el-tag>
           </div>
           <div class="config-sub">
-            <template v-if="config.configured">
-              当前：{{ config.api_key_masked }}
-              <span class="source-tag">（{{ config.source === "db" ? "页面保存" : ".env 配置" }}）</span>
+            <template v-if="!editingKey">
+              <template v-if="config.configured">
+                当前：{{ config.api_key_masked }}
+                <span class="source-tag">（{{ config.source === "db" ? "页面保存" : ".env 配置" }}）</span>
+              </template>
+              <template v-else>无</template>
             </template>
-            <template v-else>尚未配置 API Key，请填写后保存；未配置时查询会提示「未配置」。</template>
+            <template v-else>输入新的 API Key 后保存；留空保存将清除当前配置。</template>
           </div>
         </div>
         <div class="config-input">
           <el-input
+            v-if="editingKey"
             v-model="apiKeyInput"
             type="password"
             show-password
             :placeholder="config.configured ? '留空保存则清除当前配置' : '粘贴天眼查 API Key'"
             @keyup.enter="saveKey"
           />
-          <el-button type="primary" :loading="savingKey" @click="saveKey">保存</el-button>
+          <el-button v-if="!editingKey" type="primary" plain @click="startEdit">编辑</el-button>
+          <template v-else>
+            <el-button type="primary" :loading="savingKey" @click="saveKey">保存</el-button>
+            <el-button @click="cancelEdit">取消</el-button>
+          </template>
         </div>
       </div>
     </el-card>

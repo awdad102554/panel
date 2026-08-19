@@ -32,6 +32,7 @@ class PendingReserveOut(BaseModel):
     reserve_time_limit: str | None = None
     has_review: bool = False
     latest_conclusion: str | None = None
+    submitted: bool = False  # 是否已提交内网审核(不可重复提交)
 
 
 class ReserveReviewOut(BaseModel):
@@ -110,3 +111,7 @@ class ReserveReviewDecisionOut(BaseModel):
     reject_detail: str | None = None
     created_at: datetime
     created_by: str
+    submitted_at: datetime | None = None
+    submitted_by: str | None = None
+    internal_status: int | None = None
+    internal_reason: str | None = None

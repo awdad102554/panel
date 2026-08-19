@@ -1,16 +1,18 @@
 """AI 预约审查路由。
 
-- GET  /reserve-reviews/pending            待审核预约案件列表(快照 status=0)
+- GET  /reserve-reviews/pending            待审核预约案件列表(快照 status=0,附已提交内网标记)
 - POST /reserve-reviews/{id}/review        流式审查一件(NDJSON 逐步事件 + 结论),落库留痕
 - GET  /reserve-reviews/{id}               该案件最近一次审查结果
+- POST /reserve-reviews/{id}/decision      确认审核结果 → 提交内网 preAudit + 落库留痕
 
-审查结论仅作初筛建议,不写回内网审批(人机分工)。
+AI 审查结论仅作初筛建议(人机分工);工作人员确认「审核结果」后由 decision 端点提交内网。
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -34,6 +36,7 @@ from app.schemas.reserve_review import (
     ReserveReviewDecisionOut,
     ReserveReviewOut,
 )
+from app.services import reserve_decision_submit as decision_submit
 from app.services import reserve_review as review_service
 from app.services import reserve_review_runner as runner
 
@@ -80,6 +83,7 @@ async def list_pending_reserves(
 ) -> list[PendingReserveOut]:
     rows = await runner.pending_reserve_rows(db)
     latest = await runner.latest_reviews(db)
+    submitted = await runner.latest_submitted(db)
     out: list[PendingReserveOut] = []
     for row in rows:
         p = row.raw_payload or {}
@@ -95,6 +99,7 @@ async def list_pending_reserves(
                 reserve_time_limit=p.get("reserve_time_limit"),
                 has_review=row.external_case_id in latest,
                 latest_conclusion=latest.get(row.external_case_id),
+                submitted=row.external_case_id in submitted,
             )
         )
     out.sort(key=lambda x: x.reserve_at or "", reverse=True)
@@ -303,9 +308,10 @@ async def submit_decision(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Action.CONFIRM)),
 ) -> ReserveReviewDecisionOut:
-    """保存一件预约案件的人工审核结果(本地留痕,追加式,最新一条生效)。
+    """确认一件预约案件的人工审核结果:组装 → 提交内网 preAudit → 落库留痕。
 
-    TODO(内网提交): 待提供提交审核的请求体后,在此处补 POST 内网接口;本次仅落本地。
+    原子语义:内网提交失败(抛 CaseSystemError)即不落库、返回 502,前端表单保留可重试;
+    已提交过(submitted_at 非空)则 409 拒绝,不可重复提交。
     """
     row = (
         await db.execute(
@@ -323,9 +329,35 @@ async def submit_decision(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="预约案件缺少内网行 id")
     cases = p.get("cases") if isinstance(p.get("cases"), dict) else {}
 
+    # 防重:该案已有任一审核结果提交过内网(submitted_at 非空),不可重复提交。
+    submitted_exists = (
+        await db.execute(
+            select(ReserveReviewDecision.id)
+            .where(ReserveReviewDecision.external_case_id == external_case_id)
+            .where(ReserveReviewDecision.submitted_at.is_not(None))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if submitted_exists is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="该案件已提交内网审核，不可重复提交"
+        )
+
     decision = payload.decision
     reject_reason = payload.reject_reason if decision == "不同意" else None
     reject_detail = payload.reject_detail if decision == "不同意" else None
+
+    # 组装 + 提交内网;提交失败不落库(前端表单保留可重试)。
+    preaudit_payload = decision_submit.compose_preaudit_payload(decision, reject_reason, reject_detail)
+    try:
+        await decision_submit.submit_decision_to_internal(
+            int(reserve_row_id), decision, reject_reason, reject_detail
+        )
+    except CaseSystemError as exc:
+        logger.warning("预约审核提交内网失败 %s: %s", external_case_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY, detail=f"提交内网审核失败：{exc}"
+        ) from exc
 
     rec = ReserveReviewDecision(
         external_case_id=external_case_id,
@@ -337,6 +369,10 @@ async def submit_decision(
         reject_reason=reject_reason,
         reject_detail=reject_detail,
         created_by=current_user.username,
+        submitted_at=datetime.utcnow(),
+        submitted_by=current_user.username,
+        internal_status=preaudit_payload["status"],
+        internal_reason=preaudit_payload["reason"],
     )
     db.add(rec)
     await db.commit()

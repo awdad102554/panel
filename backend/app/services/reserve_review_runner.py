@@ -17,6 +17,7 @@ from app.ai.vision import fetch_material_images
 from app.integrations.case_system.client import get_case_system_client
 from app.models.internal_case import InternalCaseTracking, InternalStage
 from app.models.reserve_ai_review import ReserveAIReview
+from app.models.reserve_review_decision import ReserveReviewDecision
 from app.repositories import ai_model_repository
 from app.services import reserve_review as review_service
 
@@ -62,6 +63,16 @@ async def latest_reviews(db: AsyncSession) -> dict[str, str]:
         )
     ).all()
     return latest_review_map(rows)
+
+
+async def latest_submitted(db: AsyncSession) -> set[str]:
+    """已提交内网审核(submitted_at 非空)的案件 external_case_id 集合,供待审核列表标记。"""
+    rows = await db.execute(
+        select(ReserveReviewDecision.external_case_id)
+        .where(ReserveReviewDecision.submitted_at.is_not(None))
+        .distinct()
+    )
+    return {r[0] for r in rows.all()}
 
 
 async def valid_reviewed_ids(db: AsyncSession) -> set[str]:
