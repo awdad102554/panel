@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.llm import LLMCallError, chat_completion
+from app.ai.vision import fetch_material_images
 from app.integrations.case_system.client import get_case_system_client
 from app.models.internal_case import InternalCaseTracking, InternalStage
 from app.models.reserve_ai_review import ReserveAIReview
@@ -102,6 +103,9 @@ async def save_review(
         missing_materials=result["missing_materials"],
         rule_refs=result["rule_refs"],
         checks=result.get("checks", []),
+        decision=result.get("decision"),
+        reject_reason=result.get("reject_reason"),
+        reject_detail=result.get("reject_detail"),
         model_name=model_name,
         case_snapshot=snapshot,
         raw_result=result,
@@ -131,7 +135,6 @@ async def run_review(
     client = get_case_system_client()
     detail = await review_service.fetch_reserve_detail(client, int(reserve_row_id))
     snapshot = review_service.build_case_payload(detail)
-    messages = review_service.build_messages(snapshot)
 
     model_config = await ai_model_repository.get_enabled_model(db)
     if model_config is None:
@@ -140,6 +143,13 @@ async def run_review(
     else:
         model_name = model_config.model_name
         try:
+            if model_config.supports_vision:
+                # 视觉模型:拉证件照片(身份证/证照正反面)看图核对;拉取失败/超限静默跳过。
+                images = review_service.collect_material_images(detail)
+                parts = await fetch_material_images(client, images)
+                messages = review_service.build_vision_messages(snapshot, parts)
+            else:
+                messages = review_service.build_messages(snapshot)
             text = await chat_completion(messages, model_config)
         except LLMCallError as exc:
             result = review_service.failure_result(str(exc))

@@ -213,6 +213,7 @@ export interface AIModelConfig {
   model_name: string;
   temperature: number | null;
   max_tokens: number | null;
+  supports_vision: boolean;
   is_enabled: boolean;
   remark: string | null;
   created_at: string;
@@ -235,6 +236,18 @@ export interface PendingReserve {
 
 export type ReviewConclusion = "通过" | "补正" | "驳回" | "审查失败";
 
+export type ReviewDecision = "同意" | "不同意";
+
+export interface ReserveReviewDecision {
+  id: string;
+  external_case_id: string;
+  decision: ReviewDecision;
+  reject_reason: string | null;
+  reject_detail: string | null;
+  created_at: string;
+  created_by: string;
+}
+
 export interface ReviewCheck {
   rule_id: string;
   rule_name: string;
@@ -256,6 +269,10 @@ export interface ReserveReviewResult {
   missing_materials: string[];
   rule_refs: string[];
   checks: ReviewCheck[];
+  /** AI 预测的审核口径:同意/不同意(审查失败为 null) */
+  decision: ReviewDecision | null;
+  reject_reason: string | null;
+  reject_detail: string | null;
   model_name: string | null;
   case_snapshot: Record<string, unknown>;
   raw_result: Record<string, unknown>;

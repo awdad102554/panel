@@ -30,6 +30,7 @@ const form = reactive({
   model_name: "",
   temperature: 0.2 as number | null,
   max_tokens: DEFAULT_MAX_TOKENS as number | null,
+  supports_vision: false,
   remark: "",
 });
 
@@ -50,6 +51,7 @@ function resetForm() {
   form.model_name = "";
   form.temperature = 0.2;
   form.max_tokens = DEFAULT_MAX_TOKENS;
+  form.supports_vision = false;
   form.remark = "";
   maxTokensTouched.value = false;
 }
@@ -81,6 +83,7 @@ function openEdit(row: AIModelConfig) {
   form.model_name = row.model_name;
   form.temperature = row.temperature;
   form.max_tokens = row.max_tokens ?? DEFAULT_MAX_TOKENS;
+  form.supports_vision = row.supports_vision;
   form.remark = row.remark ?? "";
   // 编辑已有配置:保留已存的上限,不随模型名重新触发自动填入。
   maxTokensTouched.value = true;
@@ -157,6 +160,12 @@ onMounted(refresh);
       <el-table-column label="最大输出" width="110">
         <template #default="{ row }">
           {{ row.max_tokens?.toLocaleString() ?? "-" }}
+        </template>
+      </el-table-column>
+      <el-table-column label="图片识别" width="100">
+        <template #default="{ row }">
+          <el-tag v-if="row.supports_vision" type="success" effect="plain">支持</el-tag>
+          <el-tag v-else type="info">不支持</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="base_url" label="Base URL" show-overflow-tooltip />
@@ -236,6 +245,10 @@ onMounted(refresh);
         </el-form-item>
         <el-form-item label="Temperature">
           <el-input-number v-model="form.temperature" :min="0" :max="2" :step="0.1" />
+        </el-form-item>
+        <el-form-item label="图片识别">
+          <el-switch v-model="form.supports_vision" />
+          <span class="field-hint">开启后预约审查会发给模型看证件照片核对；关闭则只看照片是否上传</span>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="form.remark" type="textarea" :rows="2" />

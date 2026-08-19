@@ -1,16 +1,18 @@
 <script setup lang="ts">
 import { Check, Close, Document, View, WarningFilled } from "@element-plus/icons-vue";
 import { ElMessage } from "element-plus";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, reactive, ref, watch } from "vue";
 
 import * as reserveApi from "@/api/reserveReview";
 import ReserveDetailTree from "@/components/ReserveDetailTree.vue";
 import type {
   PendingReserve,
   ReserveCaseDetail,
+  ReserveReviewDecision,
   ReserveReviewResult,
   ReviewCheck,
   ReviewConclusion,
+  ReviewDecision,
   ReviewStepEvent,
 } from "@/types";
 
@@ -28,6 +30,18 @@ const BASE_STEPS: { key: string; label: string }[] = [
   { key: "parse", label: "解析审查结论" },
 ];
 
+// 人工「审核结果」——「不同意」的 8 个固定理由(单选);仅「请补正」「其他」需补填具体信息。
+const REJECT_REASONS: { label: string; needDetail: boolean }[] = [
+  { label: "您的预申请不属于劳动人事争议仲裁委受案范围", needDetail: false },
+  { label: "您的预申请中仲裁请求和事实理由不明确", needDetail: false },
+  { label: "您的预申请中被申请人不明确（或被申请人信息有误）", needDetail: false },
+  { label: "您的预申请不属于本委管辖范围", needDetail: false },
+  { label: "您的预申请事项已经受理，案件正在审理中，请勿重复提交", needDetail: false },
+  { label: "您的预申请事项已经由仲裁机构处理完毕，请勿重复提交", needDetail: false },
+  { label: "请补正", needDetail: true },
+  { label: "其他", needDetail: true },
+];
+
 const pending = ref<PendingReserve[]>([]);
 const loadingList = ref(false);
 const selectedId = ref<string | null>(null);
@@ -38,6 +52,29 @@ const showSnapshot = ref(false);
 const detailVisible = ref(false);
 const detailLoading = ref(false);
 const caseDetail = ref<ReserveCaseDetail | null>(null);
+
+const decisionSaving = ref(false);
+const savedDecision = ref<ReserveReviewDecision | null>(null);
+const decisionForm = reactive({
+  decision: "同意" as ReviewDecision,
+  rejectReason: null as string | null,
+  rejectDetail: "",
+});
+
+const needsDetail = computed(
+  () => REJECT_REASONS.some((r) => r.label === decisionForm.rejectReason && r.needDetail),
+);
+
+// 切回「同意」时清空理由与补充说明,避免残留脏数据。
+watch(
+  () => decisionForm.decision,
+  (v) => {
+    if (v === "同意") {
+      decisionForm.rejectReason = null;
+      decisionForm.rejectDetail = "";
+    }
+  },
+);
 
 const selectedCase = computed(
   () => pending.value.find((p) => p.external_case_id === selectedId.value) ?? null,
@@ -80,6 +117,7 @@ async function loadPending() {
       const first = pending.value[0];
       selectedId.value = first.external_case_id;
       await loadLatestReview(first);
+      await loadDecision(first.external_case_id);
     }
   } catch {
     ElMessage.error("待审核案件列表加载失败,请稍后重试");
@@ -110,10 +148,43 @@ async function loadLatestReview(row: PendingReserve) {
   }
 }
 
-function selectCase(row: PendingReserve) {
+function applyDecisionToForm(d: ReserveReviewDecision) {
+  decisionForm.decision = d.decision;
+  decisionForm.rejectReason = d.reject_reason;
+  decisionForm.rejectDetail = d.reject_detail ?? "";
+}
+
+function applyPrediction(pred: ReserveReviewResult | null) {
+  // AI 预测的审核口径预填进表单,供人工编辑确认;无预测(审查失败)则归零。
+  if (pred?.decision === "同意" || pred?.decision === "不同意") {
+    decisionForm.decision = pred.decision;
+    decisionForm.rejectReason = pred.reject_reason;
+    decisionForm.rejectDetail = pred.reject_detail ?? "";
+  } else {
+    decisionForm.decision = "同意";
+    decisionForm.rejectReason = null;
+    decisionForm.rejectDetail = "";
+  }
+}
+
+async function loadDecision(id: string) {
+  try {
+    const d = await reserveApi.getReviewDecision(id);
+    if (selectedId.value !== id) return;
+    savedDecision.value = d;
+    applyDecisionToForm(d);
+  } catch {
+    if (selectedId.value !== id) return;
+    savedDecision.value = null;
+    applyPrediction(result.value); // 无已确认决定时,回退到 AI 预测预填
+  }
+}
+
+async function selectCase(row: PendingReserve) {
   if (reviewing.value) return;
   selectedId.value = row.external_case_id;
-  loadLatestReview(row);
+  await loadLatestReview(row); // 先取 AI 结果,供 loadDecision 回退预填
+  await loadDecision(row.external_case_id);
 }
 
 async function startReview(row: PendingReserve) {
@@ -126,6 +197,7 @@ async function startReview(row: PendingReserve) {
   try {
     const final = await reserveApi.reviewReserve(row.external_case_id, applyEvent);
     result.value = final;
+    applyPrediction(final); // 用 AI 预测预填审核结果表单,供人工编辑确认
     // 审查完成即标记该案件已有结果,按钮即时翻转为「重新审核」,无需刷新列表。
     const idx = pending.value.findIndex((p) => p.external_case_id === row.external_case_id);
     if (idx !== -1) {
@@ -139,6 +211,35 @@ async function startReview(row: PendingReserve) {
     ElMessage.error(e instanceof Error ? e.message : "审查失败,请稍后重试");
   } finally {
     reviewing.value = false;
+  }
+}
+
+async function submitDecision() {
+  if (!selectedId.value || decisionSaving.value) return;
+  if (decisionForm.decision === "不同意") {
+    if (!decisionForm.rejectReason) {
+      ElMessage.warning("请选择不同意理由");
+      return;
+    }
+    if (needsDetail.value && !decisionForm.rejectDetail.trim()) {
+      ElMessage.warning("请填写具体信息");
+      return;
+    }
+  }
+  decisionSaving.value = true;
+  try {
+    const d = await reserveApi.submitReviewDecision(selectedId.value, {
+      decision: decisionForm.decision,
+      reject_reason: decisionForm.decision === "不同意" ? decisionForm.rejectReason : null,
+      reject_detail: decisionForm.decision === "不同意" ? decisionForm.rejectDetail.trim() : null,
+    });
+    savedDecision.value = d;
+    applyDecisionToForm(d);
+    ElMessage.success("审核结果已保存");
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : "审核结果保存失败,请稍后重试");
+  } finally {
+    decisionSaving.value = false;
   }
 }
 
@@ -349,6 +450,56 @@ onMounted(loadPending);
             </div>
             <pre v-if="showSnapshot" class="snapshot-pre">{{ JSON.stringify(result.case_snapshot, null, 2) }}</pre>
           </div>
+
+          <!-- 人工审核结果 -->
+          <div class="decision-card">
+            <div class="card-title">
+              审核结果
+              <el-tag
+                v-if="savedDecision"
+                size="small"
+                :type="savedDecision.decision === '同意' ? 'success' : 'danger'"
+              >
+                {{ savedDecision.decision }}
+              </el-tag>
+            </div>
+
+            <el-radio-group v-model="decisionForm.decision" class="decision-radio">
+              <el-radio value="同意" :border="true">同意</el-radio>
+              <el-radio value="不同意" :border="true">不同意</el-radio>
+            </el-radio-group>
+
+            <template v-if="decisionForm.decision === '不同意'">
+              <div class="reason-group">
+                <div class="reason-title">不同意理由（单选）</div>
+                <el-radio-group v-model="decisionForm.rejectReason" class="reason-list">
+                  <el-radio v-for="r in REJECT_REASONS" :key="r.label" :value="r.label">
+                    {{ r.label }}
+                  </el-radio>
+                </el-radio-group>
+              </div>
+              <el-input
+                v-if="needsDetail"
+                v-model="decisionForm.rejectDetail"
+                type="textarea"
+                :rows="3"
+                maxlength="500"
+                show-word-limit
+                placeholder="请填写具体信息"
+                class="reason-detail"
+              />
+            </template>
+
+            <div class="decision-actions">
+              <el-button type="primary" :loading="decisionSaving" @click="submitDecision">
+                提交审核结果
+              </el-button>
+              <span v-if="savedDecision" class="decision-meta">
+                {{ savedDecision.created_at?.slice(0, 19).replace("T", " ") }} ·
+                {{ savedDecision.created_by }}
+              </span>
+            </div>
+          </div>
         </template>
       </div>
     </div>
@@ -529,7 +680,8 @@ onMounted(loadPending);
 
 .steps-card,
 .result-card,
-.snapshot-card {
+.snapshot-card,
+.decision-card {
   margin: 12px 16px;
   padding: 14px;
   border-radius: var(--radius-md);
@@ -835,6 +987,62 @@ onMounted(loadPending);
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* 人工审核结果卡片 */
+.decision-card {
+  background: #fff;
+  border-top: 3px solid transparent;
+}
+
+.decision-radio {
+  display: flex;
+  gap: 12px;
+}
+
+.reason-group {
+  margin-top: 14px;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: var(--radius-md);
+}
+
+.reason-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--el-text-color-primary);
+  margin-bottom: 10px;
+}
+
+.reason-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.reason-list .el-radio {
+  margin-right: 0;
+  height: auto;
+  white-space: normal;
+  line-height: 1.6;
+}
+
+.reason-detail {
+  margin-top: 12px;
+}
+
+.decision-actions {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(15, 31, 74, 0.06);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.decision-meta {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>
 

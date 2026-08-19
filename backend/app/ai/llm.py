@@ -16,6 +16,29 @@ class LLMCallError(Exception):
     """模型调用失败(网络不可达 / 认证失败 / 响应异常),上层捕获后转「审查失败」结论。"""
 
 
+def _http_error_detail(resp: httpx.Response) -> str:
+    """从 4xx/5xx 响应里尽量抠出可读的错误信息(OpenAI/DashScope 多为 {error:{message}})。
+
+    抠不到就退回原样文本,并截断到 300 字,避免把长文本/正文刷进「审查失败」留痕。
+    """
+    detail = ""
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                detail = str(err.get("message") or "")
+            else:
+                detail = str(body.get("message") or "")
+    except (ValueError, TypeError):
+        detail = ""
+    if not detail:
+        detail = (resp.text or "").strip()
+    if len(detail) > 300:
+        detail = detail[:300] + "…"
+    return detail or "（无响应体）"
+
+
 async def chat_completion(
     messages: list[dict],
     config: AIModelConfig,
@@ -41,7 +64,9 @@ async def chat_completion(
             resp.raise_for_status()
             body = resp.json()
     except httpx.HTTPStatusError as exc:
-        raise LLMCallError(f"模型接口返回 {exc.response.status_code}") from exc
+        raise LLMCallError(
+            f"模型接口返回 {exc.response.status_code}: {_http_error_detail(exc.response)}"
+        ) from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise LLMCallError(f"模型调用失败: {exc}") from exc
 

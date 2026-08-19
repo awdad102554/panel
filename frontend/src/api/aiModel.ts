@@ -9,6 +9,7 @@ export interface AIModelPayload {
   model_name: string;
   temperature?: number | null;
   max_tokens?: number | null;
+  supports_vision?: boolean;
   remark?: string | null;
 }
 

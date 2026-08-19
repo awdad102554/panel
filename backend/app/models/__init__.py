@@ -14,6 +14,7 @@ from app.models.internal_case import (
     SyncVerificationReport,
 )
 from app.models.reserve_ai_review import ReserveAIReview
+from app.models.reserve_review_decision import ReserveReviewDecision
 
 __all__ = [
     "User",
@@ -32,4 +33,5 @@ __all__ = [
     "CaseTimeLimitOverride",
     "SyncVerificationReport",
     "ReserveAIReview",
+    "ReserveReviewDecision",
 ]

@@ -29,6 +29,9 @@ class ReserveAIReview(Base):
     missing_materials: Mapped[list] = mapped_column(JSONB, default=list)
     rule_refs: Mapped[list] = mapped_column(JSONB, default=list)
     checks: Mapped[list] = mapped_column(JSONB, default=list)  # 5 条规则逐项通过/不通过,供逐字段展示
+    decision: Mapped[str | None] = mapped_column(String(16), nullable=True)  # AI 预测:同意/不同意
+    reject_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)  # AI 预测:不同意理由(8 选 1)
+    reject_detail: Mapped[str | None] = mapped_column(Text, nullable=True)  # AI 预测:请补正/其他 的补充说明
     model_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     case_snapshot: Mapped[dict] = mapped_column(JSONB)  # 送入 AI 的结构化摘要(供校准)
     raw_result: Mapped[dict] = mapped_column(JSONB)  # 模型原始输出(解析后的完整 JSON)

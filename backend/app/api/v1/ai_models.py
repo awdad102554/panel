@@ -32,6 +32,7 @@ def _to_out(model: AIModelConfig) -> AIModelOut:
         model_name=model.model_name,
         temperature=model.temperature,
         max_tokens=model.max_tokens,
+        supports_vision=model.supports_vision,
         is_enabled=model.is_enabled,
         remark=model.remark,
         created_at=model.created_at,

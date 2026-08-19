@@ -24,9 +24,16 @@ from app.db.session import SessionLocal, get_db
 from app.integrations.case_system.client import CaseSystemError, get_case_system_client
 from app.models.internal_case import InternalCaseTracking, InternalStage
 from app.models.reserve_ai_review import ReserveAIReview
+from app.models.reserve_review_decision import ReserveReviewDecision
 from app.models.user import User
 from app.repositories import ai_model_repository
-from app.schemas.reserve_review import PendingReserveOut, ReserveCaseDetailOut, ReserveReviewOut
+from app.schemas.reserve_review import (
+    PendingReserveOut,
+    ReserveCaseDetailOut,
+    ReserveReviewDecisionCreate,
+    ReserveReviewDecisionOut,
+    ReserveReviewOut,
+)
 from app.services import reserve_review as review_service
 from app.services import reserve_review_runner as runner
 
@@ -267,3 +274,71 @@ async def get_latest_review(
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="该案件尚无审查记录")
     return ReserveReviewOut.model_validate(row)
+
+
+@router.get("/{external_case_id}/decision", response_model=ReserveReviewDecisionOut)
+async def get_latest_decision(
+    external_case_id: str,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(require_permission(Action.VIEW)),
+) -> ReserveReviewDecisionOut:
+    """该案件最近一次人工审核结果(同意/不同意 + 理由);无记录 404。"""
+    row = (
+        await db.execute(
+            select(ReserveReviewDecision)
+            .where(ReserveReviewDecision.external_case_id == external_case_id)
+            .order_by(ReserveReviewDecision.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="该案件尚无人工审核结果")
+    return ReserveReviewDecisionOut.model_validate(row)
+
+
+@router.post("/{external_case_id}/decision", response_model=ReserveReviewDecisionOut, status_code=status.HTTP_201_CREATED)
+async def submit_decision(
+    external_case_id: str,
+    payload: ReserveReviewDecisionCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Action.CONFIRM)),
+) -> ReserveReviewDecisionOut:
+    """保存一件预约案件的人工审核结果(本地留痕,追加式,最新一条生效)。
+
+    TODO(内网提交): 待提供提交审核的请求体后,在此处补 POST 内网接口;本次仅落本地。
+    """
+    row = (
+        await db.execute(
+            select(InternalCaseTracking).where(
+                InternalCaseTracking.external_case_id == external_case_id
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None or row.stage != InternalStage.RESERVE:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="预约案件不存在")
+
+    p = row.raw_payload or {}
+    reserve_row_id = p.get("id")
+    if reserve_row_id is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="预约案件缺少内网行 id")
+    cases = p.get("cases") if isinstance(p.get("cases"), dict) else {}
+
+    decision = payload.decision
+    reject_reason = payload.reject_reason if decision == "不同意" else None
+    reject_detail = payload.reject_detail if decision == "不同意" else None
+
+    rec = ReserveReviewDecision(
+        external_case_id=external_case_id,
+        reserve_row_id=int(reserve_row_id),
+        applicant=p.get("applicant") or "",
+        respondent=p.get("respondent") or "",
+        case_reason=cases.get("case_reason"),
+        decision=decision,
+        reject_reason=reject_reason,
+        reject_detail=reject_detail,
+        created_by=current_user.username,
+    )
+    db.add(rec)
+    await db.commit()
+    await db.refresh(rec)
+    return ReserveReviewDecisionOut.model_validate(rec)

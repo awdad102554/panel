@@ -222,3 +222,59 @@ def test_failure_result_has_empty_checks():
     r = rr.failure_result("boom")
     assert r["conclusion"] == "审查失败"
     assert r["checks"] == []
+    # 审查失败无审核口径预测。
+    assert r["decision"] is None
+    assert r["reject_reason"] is None
+    assert r["reject_detail"] is None
+
+
+def test_parse_result_decision_agree():
+    r = rr.parse_result('{"conclusion":"通过","reason":"x"}')
+    assert r["decision"] == "同意"
+    assert r["reject_reason"] is None
+    assert r["reject_detail"] is None
+
+
+def test_parse_result_decision_supplement_from_conclusion():
+    # 结论=补正,模型未给 reject_reason → 兜底归类为「请补正」。
+    r = rr.parse_result('{"conclusion":"补正","reason":"x","reject_detail":"补充工资流水"}')
+    assert r["decision"] == "不同意"
+    assert r["reject_reason"] == "请补正"
+    assert r["reject_detail"] == "补充工资流水"
+
+
+def test_parse_result_decision_reject_specific_reason():
+    text = '{"conclusion":"驳回","reason":"x","reject_reason":"您的预申请不属于劳动人事争议仲裁委受案范围"}'
+    r = rr.parse_result(text)
+    assert r["decision"] == "不同意"
+    assert r["reject_reason"] == "您的预申请不属于劳动人事争议仲裁委受案范围"
+    assert r["reject_detail"] is None
+
+
+def test_parse_result_decision_reject_reason_fallback_to_other():
+    r = rr.parse_result('{"conclusion":"驳回","reason":"x","reject_reason":"瞎写的理由"}')
+    assert r["decision"] == "不同意"
+    assert r["reject_reason"] == "其他"
+
+
+def test_parse_result_decision_ignores_contradictory_decision_field():
+    # 模型 decision 与 conclusion 矛盾时,以 conclusion 为准派生。
+    r = rr.parse_result('{"conclusion":"通过","reason":"x","decision":"不同意"}')
+    assert r["decision"] == "同意"
+    assert r["reject_reason"] is None
+    assert r["reject_detail"] is None
+
+
+def test_collect_material_images_card_photos():
+    imgs = rr.collect_material_images(_DETAIL)
+    by_label = {i["label"]: i["path"] for i in imgs}
+    # 申请人正反、被申请人证照正面(反面为空路径,跳过)。
+    assert by_label["申请人身份证正面"] == "/storage/uploads/images/2026/08/6a81a680294ec.jpeg"
+    assert by_label["申请人身份证反面"] == "/storage/uploads/images/2026/08/6a81a68c6985e.jpeg"
+    assert by_label["被申请人证照正面"] == "/storage/uploads/images/2026/08/6a81a7e1b7238.png"
+    assert "被申请人证照反面" not in by_label
+    assert len(imgs) == 3
+
+
+def test_collect_material_images_empty_detail():
+    assert rr.collect_material_images({}) == []

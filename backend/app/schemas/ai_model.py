@@ -12,6 +12,7 @@ class AIModelCreate(BaseModel):
     model_name: str
     temperature: float | None = 0.2
     max_tokens: int | None = 8192
+    supports_vision: bool = False
     remark: str | None = None
 
 
@@ -25,6 +26,7 @@ class AIModelUpdate(BaseModel):
     model_name: str | None = None
     temperature: float | None = None
     max_tokens: int | None = None
+    supports_vision: bool | None = None
     remark: str | None = None
 
 
@@ -41,6 +43,7 @@ class AIModelOut(BaseModel):
     model_name: str
     temperature: float | None = None
     max_tokens: int | None = None
+    supports_vision: bool
     is_enabled: bool
     remark: str | None = None
     created_at: datetime

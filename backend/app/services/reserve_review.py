@@ -14,6 +14,7 @@ from app.integrations.case_system.client import (
     CaseSystemClient,
     CaseSystemError,
 )
+from app.schemas.reserve_review import REJECT_REASONS, REJECT_REASONS_NEED_DETAIL
 
 # 审查规则提示词,直接采用 docs/reserve-ai-review-prompt.md 第三节(基于 32 条历史驳回记录总结)。
 RESERVE_REVIEW_SYSTEM_PROMPT = """你是劳动人事争议仲裁委员会的预申请审查助手。请根据申请人提交的线上预约（预申请）
@@ -34,9 +35,27 @@ RESERVE_REVIEW_SYSTEM_PROMPT = """你是劳动人事争议仲裁委员会的预�
 - "驳回":被申请人不明确、请求或事实理由不明确、不属于受案范围、
   或经核实已无争议(如工资已结清)等;必须引用具体规则并写明理由。
 
+# 审核结果归类(映射到系统「同意/不同意」口径,必须归类到 8 条理由之一)
+- decision 取「同意」当且仅当结论为「通过」;否则取「不同意」。
+- 结论为「补正」时,reject_reason 选「请补正」,并在 reject_detail 里写清需补正的具体内容(给申请人看)。
+- 结论为「驳回」时,reject_reason 从下面 1-6 中选最贴合的一条原文;都不贴合才选「其他」并在 reject_detail 写具体原因。
+- 不同意理由(8 选 1,须输出原文):
+  1. 您的预申请不属于劳动人事争议仲裁委受案范围
+  2. 您的预申请中仲裁请求和事实理由不明确
+  3. 您的预申请中被申请人不明确（或被申请人信息有误）
+  4. 您的预申请不属于本委管辖范围
+  5. 您的预申请事项已经受理，案件正在审理中，请勿重复提交
+  6. 您的预申请事项已经由仲裁机构处理完毕，请勿重复提交
+  7. 请补正
+  8. 其他
+- reject_detail 仅在 reject_reason 为「请补正」或「其他」时填写;其余理由填 null。
+
 # 输出格式(只输出 JSON,不要其他内容)
 {
   "conclusion": "通过" | "补正" | "驳回",
+  "decision": "同意" | "不同意",
+  "reject_reason": "不同意理由(8 选 1 原文;decision=同意 时为 null)",
+  "reject_detail": "请补正/其他 的补充说明(其余为 null)",
   "reason": "给申请人的结论说明(通俗、具体,可直接作为系统驳回/补正理由展示)",
   "issues": ["审查发现的问题点,逐条列出"],
   "missing_materials": ["缺少的材料(仅补正时填)"],
@@ -83,7 +102,33 @@ def failure_result(reason: str) -> dict[str, Any]:
         "missing_materials": [],
         "rule_refs": [],
         "checks": [],
+        "decision": None,
+        "reject_reason": None,
+        "reject_detail": None,
     }
+
+
+def _normalize_decision(
+    obj: dict[str, Any], conclusion: str
+) -> tuple[str | None, str | None, str | None]:
+    """把模型输出归类为系统「同意/不同意」口径:decision + 8 选 1 的 reject_reason + reject_detail。
+
+    decision 由结论确定性派生(通过→同意,否则→不同意),不信任模型可能自相矛盾的 decision 字段;
+    理由漏给/给错时兜底:补正→请补正;驳回→其他。
+    """
+    decision = "同意" if conclusion == "通过" else "不同意"
+    if decision == "同意":
+        return "同意", None, None
+
+    reject_reason = obj.get("reject_reason")
+    if reject_reason not in REJECT_REASONS:
+        reject_reason = "请补正" if conclusion == "补正" else "其他"
+
+    reject_detail = None
+    if reject_reason in REJECT_REASONS_NEED_DETAIL:
+        detail = _str(obj.get("reject_detail")).strip()
+        reject_detail = detail or None
+    return decision, reject_reason, reject_detail
 
 
 async def fetch_reserve_detail(client: CaseSystemClient, row_id: int) -> dict:
@@ -327,6 +372,58 @@ def build_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
+# 视觉模型附加指令:告知模型已随请求附带证件照片,须看图核对,而非只看字段。
+VISION_INSTRUCTIONS = """
+
+# 图片核对(本次已附带证件照片)
+本次审查额外附带了当事人的身份证/证照照片(以图片给出,并标注了所属当事人与证件正反面)。
+请实际查看图片内容,核对与结构化字段是否一致(申请人姓名/身份证号、被申请人名称/统一社会信用代码等):
+- 图片与字段明显不一致、图片无法辨认/缺失的,相应 checks 项 passed 填 null 或 false,并在 note 写明具体问题;
+- 严禁忽略图片、仅凭字段直接判通过;
+- 仍无法确认的信息(如工商登记真伪)不臆断,passed 填 null 并写"需人工核验"。
+"""
+
+
+def collect_material_images(detail: dict) -> list[dict[str, str]]:
+    """从预约详情收集证件照片路径(身份证/证照正反面),供视觉模型看图核对。
+
+    仅收集非空路径的 card_image_front/reverse;证据材料图片不在此列(只看字段信息)。
+    路径归一化(补前导 `/`)交给 app.ai.vision.fetch_material_images 处理。
+    """
+    images: list[dict[str, str]] = []
+    for raw, role_label, doc_label in (
+        (detail.get("applicant"), "申请人", "身份证"),
+        (detail.get("respondent"), "被申请人", "证照"),
+        (detail.get("thirdpartys"), "其他当事人", "证件"),
+    ):
+        if not isinstance(raw, list):
+            continue
+        for p in raw:
+            if not isinstance(p, dict):
+                continue
+            front = _str(p.get("card_image_front"))
+            reverse = _str(p.get("card_image_reverse"))
+            if front:
+                images.append({"label": f"{role_label}{doc_label}正面", "path": front})
+            if reverse:
+                images.append({"label": f"{role_label}{doc_label}反面", "path": reverse})
+    return images
+
+
+def build_vision_messages(payload: dict[str, Any], image_parts: list[dict]) -> list[dict]:
+    """视觉模型消息:system = 审查规则 + 图片核对指令;user 为「文本摘要 + 多张图片」。"""
+    system = RESERVE_REVIEW_SYSTEM_PROMPT + VISION_INSTRUCTIONS
+    user_content: list[dict[str, Any]] = [
+        {"type": "text", "text": json.dumps(payload, ensure_ascii=False)}
+    ]
+    for img in image_parts:
+        user_content.append({"type": "image_url", "image_url": {"url": img["data_uri"]}})
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user_content},
+    ]
+
+
 def parse_result(text: str) -> dict[str, Any]:
     """把模型输出解析为 {conclusion, reason, issues, missing_materials, rule_refs}。
 
@@ -352,6 +449,7 @@ def parse_result(text: str) -> dict[str, Any]:
     if conclusion not in _VALID_CONCLUSIONS:
         return failure_result("模型未给出合法的结论(通过/补正/驳回)")
     rule_refs = _list(obj.get("rule_refs"))
+    decision, reject_reason, reject_detail = _normalize_decision(obj, conclusion)
     return {
         "conclusion": conclusion,
         "reason": _str(obj.get("reason")) or "（模型未给出说明）",
@@ -359,4 +457,7 @@ def parse_result(text: str) -> dict[str, Any]:
         "missing_materials": _list(obj.get("missing_materials")),
         "rule_refs": rule_refs,
         "checks": _normalize_checks(obj, rule_refs),
+        "decision": decision,
+        "reject_reason": reject_reason,
+        "reject_detail": reject_detail,
     }

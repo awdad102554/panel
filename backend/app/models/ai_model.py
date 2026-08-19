@@ -28,6 +28,8 @@ class AIModelConfig(Base):
     # 单次请求最大输出 token 数;新增配置时前端按主流模型上限预设自动填入(可手改),
     # 供真实 LLM Provider 发请求时使用(mock 阶段不落请求)。
     max_tokens: Mapped[int | None] = mapped_column(Integer, default=8192, nullable=True)
+    # 是否支持图片输入(视觉模型):预约审查时是否把证件照片发给模型看图核对。
+    supports_vision: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     remark: Mapped[str | None] = mapped_column(Text, nullable=True)
 

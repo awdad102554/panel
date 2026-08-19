@@ -1,5 +1,12 @@
 import { apiClient } from "@/api/client";
-import type { PendingReserve, ReserveCaseDetail, ReserveReviewResult, ReviewStepEvent } from "@/types";
+import type {
+  PendingReserve,
+  ReserveCaseDetail,
+  ReserveReviewDecision,
+  ReserveReviewResult,
+  ReviewDecision,
+  ReviewStepEvent,
+} from "@/types";
 
 export function listPendingReserve() {
   return apiClient.get<PendingReserve[]>("/reserve-reviews/pending").then((res) => res.data);
@@ -8,6 +15,21 @@ export function listPendingReserve() {
 export function getLatestReview(externalCaseId: string) {
   return apiClient
     .get<ReserveReviewResult>(`/reserve-reviews/${externalCaseId}`)
+    .then((res) => res.data);
+}
+
+export function getReviewDecision(externalCaseId: string) {
+  return apiClient
+    .get<ReserveReviewDecision>(`/reserve-reviews/${externalCaseId}/decision`)
+    .then((res) => res.data);
+}
+
+export function submitReviewDecision(
+  externalCaseId: string,
+  body: { decision: ReviewDecision; reject_reason: string | null; reject_detail: string | null },
+) {
+  return apiClient
+    .post<ReserveReviewDecision>(`/reserve-reviews/${externalCaseId}/decision`, body)
     .then((res) => res.data);
 }
 
