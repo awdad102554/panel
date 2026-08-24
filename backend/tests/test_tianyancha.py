@@ -12,6 +12,7 @@ from app.integrations.tianyancha.client import (
 )
 from app.services.tianyancha_lookup import (
     _build_arguments,
+    _extract_main_personnel,
     _parse_markdown_table,
     _parse_profile_markdown,
     _pick_company_search_tool,
@@ -246,17 +247,88 @@ def test_tianyancha_auth_error_is_subclass():
     assert issubclass(TianyanchaAuthError, TianyanchaError)
 
 
+_PEOPLE_MD = (
+    "# 公司人员列表：测试公司\n\n"
+    "## 主要人员\n\n"
+    "### 主要人员（2 条）\n\n"
+    "| # | 姓名 | 职务 |\n|---|---|---|\n"
+    "| 1 | 张三 | 执行董事兼总经理 |\n"
+    "| 2 | 李四 | 监事 |\n"
+    "\n## 核心团队\n\n"
+    "### 明细（1 条）\n\n"
+    "| # | 名称 | 标题 |\n|---|---|---|\n"
+    "| 1 | 张三 | 创始人 |\n"
+)
+
+
+def test_extract_main_personnel_returns_first_table_only():
+    rows = _extract_main_personnel(_PEOPLE_MD)
+    assert len(rows) == 2
+    assert rows[0] == {"姓名": "张三", "职务": "执行董事兼总经理"}
+    assert rows[1] == {"姓名": "李四", "职务": "监事"}
+
+
+def test_extract_main_personnel_empty_or_wrong_columns():
+    assert _extract_main_personnel("") == []
+    # 首表不含「姓名/职务」列(如只有 名称/标题),视为无主要人员
+    md = "| # | 名称 | 标题 |\n|---|---|---|\n| 1 | 张三 | 创始人 |\n"
+    assert _extract_main_personnel(md) == []
+
+
 def test_get_company_details_end_to_end_with_fake_client():
     class FakeClient:
         async def call_tool(self, name, arguments):
-            assert name == "get_company_basic_profile"
             assert arguments == {"company_name": "测试公司"}
-            return {"content": [{"type": "text", "text": _PROFILE_MD}]}
+            if name == "get_company_basic_profile":
+                return {"content": [{"type": "text", "text": _PROFILE_MD}]}
+            if name == "get_company_people":
+                return {"content": [{"type": "text", "text": _PEOPLE_MD}]}
+            raise AssertionError(f"unexpected tool: {name}")
 
     data = asyncio.run(get_company_details("测试公司", client=FakeClient()))
     assert data["tool"] == "get_company_basic_profile"
     assert data["company_name"] == "测试公司"
     assert data["overview"][0]["字段"] == "企业名称"
+    # 主要人员表成为首个明细,姓名/职务列正确;联系电话明细顺延到第二位
+    assert data["details"][0]["title"] == "主要人员（2 条）"
+    assert data["details"][0]["headers"] == ["姓名", "职务"]
+    assert data["details"][0]["rows"][0]["姓名"] == "张三"
+    assert data["details"][1]["title"] == "联系电话明细（2 条）"
+
+
+def test_get_company_details_adds_legal_rep_position():
+    profile_md = (
+        "### 企业基本信息\n\n"
+        "#### 概览字段\n\n"
+        "| 字段 | 值 |\n|---|---|\n"
+        "| 企业名称 | 测试公司 |\n"
+        "| 法定代表人 | 张三 |\n"
+    )
+
+    class FakeClient:
+        async def call_tool(self, name, arguments):
+            if name == "get_company_basic_profile":
+                return {"content": [{"type": "text", "text": profile_md}]}
+            if name == "get_company_people":
+                return {"content": [{"type": "text", "text": _PEOPLE_MD}]}
+            raise AssertionError(f"unexpected tool: {name}")
+
+    data = asyncio.run(get_company_details("测试公司", client=FakeClient()))
+    fields = [f["字段"] for f in data["overview"]]
+    # 职位合并进「法定代表人」字段,不再单独出现「法定代表人职务」
+    assert "法定代表人职务" not in fields
+    assert data["overview"][fields.index("法定代表人")]["值"] == "张三（执行董事兼总经理）"
+
+
+def test_get_company_details_people_failure_degrades():
+    class FakeClient:
+        async def call_tool(self, name, arguments):
+            if name == "get_company_basic_profile":
+                return {"content": [{"type": "text", "text": _PROFILE_MD}]}
+            raise TianyanchaError("quota exceeded")
+
+    data = asyncio.run(get_company_details("测试公司", client=FakeClient()))
+    # 拉取主要人员失败不阻断:仅基础画像,无「主要人员」明细
     assert data["details"][0]["title"] == "联系电话明细（2 条）"
 
 

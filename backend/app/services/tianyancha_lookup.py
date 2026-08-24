@@ -236,6 +236,28 @@ def _parse_profile_markdown(text: str) -> dict:
     return {"overview": overview, "details": details}
 
 
+def _extract_main_personnel(text: str) -> list[dict]:
+    """抽取 get_company_people 的「主要人员」表(姓名/职务),用于补法定代表人职位。
+
+    只取第一张表(主要人员),到表格块结束(首个非 `|` 行)为止,避免把后面的董监高/
+    核心团队等明细表混进来;表头须含「姓名/职务」两列,否则返回 []。
+    """
+    if not text:
+        return []
+    block: list[str] = []
+    for ln in text.splitlines():
+        if ln.strip().startswith("|"):
+            block.append(ln)
+        elif block:
+            break
+    if not block:
+        return []
+    headers, rows = _parse_table_block(block)
+    if "姓名" not in headers or "职务" not in headers:
+        return []
+    return rows
+
+
 async def search_company(query: str, client=None) -> dict:
     """查企业基本信息,返回 {query, tool, fields, raw};fields 为候选企业 dict 列表。"""
     client = client or get_tianyancha_client()
@@ -260,7 +282,13 @@ async def search_company(query: str, client=None) -> dict:
 
 
 async def get_company_details(company_name: str, client=None) -> dict:
-    """查企业基础详情:调用 get_company_basic_profile,解析为概览字段 + 明细表。"""
+    """查企业基础详情:基础画像 + 主要人员(补法定代表人职位)。
+
+    - get_company_basic_profile → 概览字段 + 明细表(联系方式/曾用名等)。
+    - get_company_people → 抽取「主要人员」表(姓名/职务):把法定代表人职位合并进
+      「法定代表人」字段(如「曾毓群（董事长；总经理）」),并在概览后附「主要人员（N 条）」明细表。
+    people 拉取失败(额度/无数据)不阻断基础详情,仅降级为不展示人员信息。
+    """
     client = client or get_tianyancha_client()
     if client is None:
         raise TianyanchaError("tianyancha_not_configured")
@@ -270,10 +298,44 @@ async def get_company_details(company_name: str, client=None) -> dict:
     )
     text = _extract_result_text(result)
     parsed = _parse_profile_markdown(text)
+    overview = parsed["overview"]
+    details = parsed["details"]
+
+    people: list[dict] = []
+    try:
+        people_result = await client.call_tool(
+            "get_company_people", {"company_name": company_name}
+        )
+        people = _extract_main_personnel(_extract_result_text(people_result))
+    except TianyanchaError as exc:
+        logger.warning("天眼查主要人员拉取失败 %s: %s", company_name, exc)
+
+    if people:
+        legal_rep = next(
+            (r["值"] for r in overview if r["字段"] == "法定代表人"), None
+        )
+        rep = next(
+            (p for p in people if legal_rep and p.get("姓名") == legal_rep), None
+        )
+        if rep and rep.get("职务"):
+            # 法定代表人职位合并进名称,形如「曾毓群（董事长；总经理）」。
+            for r in overview:
+                if r["字段"] == "法定代表人":
+                    r["值"] = f"{legal_rep}（{rep['职务']}）"
+                    break
+        details.insert(
+            0,
+            {
+                "title": f"主要人员（{len(people)} 条）",
+                "headers": ["姓名", "职务"],
+                "rows": people,
+            },
+        )
+
     return {
         "company_name": company_name,
         "tool": "get_company_basic_profile",
-        "overview": parsed["overview"],
-        "details": parsed["details"],
+        "overview": overview,
+        "details": details,
         "raw": text,
     }
