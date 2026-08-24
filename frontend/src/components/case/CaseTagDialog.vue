@@ -1,0 +1,173 @@
+<script setup lang="ts">
+import { ElMessage } from "element-plus";
+import { ref, watch } from "vue";
+
+import * as caseTagApi from "@/api/caseTag";
+import type { CaseTag } from "@/api/caseTag";
+
+const props = defineProps<{
+  modelValue: boolean;
+  subjectKey: string;
+  title: string;
+}>();
+
+const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
+
+const STAGE_LABELS: Record<string, string> = {
+  reserve: "线上预约",
+  receive: "收件审查",
+  handle: "立案在办",
+  virtual: "预登记",
+};
+
+const tags = ref<CaseTag[]>([]);
+const loading = ref(false);
+const content = ref("");
+const saving = ref(false);
+
+function stageLabel(stage: string): string {
+  return STAGE_LABELS[stage] ?? stage;
+}
+
+function formatTime(iso: string): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+async function load() {
+  loading.value = true;
+  try {
+    tags.value = await caseTagApi.listCaseTags(props.subjectKey);
+  } catch {
+    ElMessage.error("标签加载失败,请稍后重试");
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function add() {
+  const text = content.value.trim();
+  if (!text) return;
+  saving.value = true;
+  try {
+    await caseTagApi.createCaseTag(props.subjectKey, text);
+    content.value = "";
+    await load();
+  } catch (err) {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    ElMessage.error(status === 409 ? "请先在右上角设置用户名" : "标签保存失败,请稍后重试");
+  } finally {
+    saving.value = false;
+  }
+}
+
+watch(
+  () => props.modelValue,
+  (v) => {
+    if (v) {
+      content.value = "";
+      load();
+    }
+  },
+);
+</script>
+
+<template>
+  <el-dialog
+    :model-value="modelValue"
+    :title="`标签 · ${title}`"
+    width="640px"
+    @update:model-value="emit('update:modelValue', $event)"
+  >
+    <div v-loading="loading" class="tag-list">
+      <el-empty v-if="!loading && tags.length === 0" description="暂无标签" :image-size="60" />
+      <div v-for="n in tags" :key="n.id" class="tag-item">
+        <div class="tag-meta">
+          <span class="tag-time">{{ formatTime(n.created_at) }}</span>
+          <el-tag size="small" effect="plain">{{ stageLabel(n.stage) }}</el-tag>
+          <span class="tag-sub">{{ n.operator }}</span>
+          <span class="tag-sub tag-ip" :title="`设备IP: ${n.client_ip}`">IP {{ n.client_ip || "-" }}</span>
+        </div>
+        <div class="tag-content">{{ n.content }}</div>
+      </div>
+    </div>
+
+    <div class="tag-add">
+      <el-input
+        v-model="content"
+        type="textarea"
+        :rows="3"
+        maxlength="2000"
+        show-word-limit
+        placeholder="输入标签内容…(保存后不可修改)"
+      />
+      <el-button
+        type="primary"
+        :loading="saving"
+        :disabled="!content.trim()"
+        style="margin-top: 8px; align-self: flex-end"
+        @click="add"
+      >
+        添加标签
+      </el-button>
+    </div>
+
+    <template #footer>
+      <el-button @click="emit('update:modelValue', false)">关闭</el-button>
+    </template>
+  </el-dialog>
+</template>
+
+<style scoped>
+.tag-list {
+  max-height: 320px;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+
+.tag-item {
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent-blue);
+  background: #f8fafc;
+  border-radius: 0 6px 6px 0;
+  margin-bottom: 8px;
+}
+
+.tag-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.tag-time {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.tag-sub {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.tag-ip {
+  color: var(--el-text-color-placeholder);
+}
+
+.tag-content {
+  font-size: 14px;
+  color: var(--el-text-color-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.6;
+}
+
+.tag-add {
+  display: flex;
+  flex-direction: column;
+}
+</style>

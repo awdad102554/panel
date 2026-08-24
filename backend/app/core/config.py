@@ -18,6 +18,14 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://panel:panel@localhost:5432/panel"
 
+    # MySQL(与 InfoWeb 共享:案件标签 case_tags + IP→用户名绑定 user_ip)。
+    # 敏感口令默认空,真实值必须由 backend/.env 提供(MYSQL_PASSWORD),不落仓库。
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: str = ""
+    mysql_db: str = "判决书生成"
+
     jwt_secret_key: str = "change-me-in-production"
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 12

@@ -4,6 +4,7 @@ import { onMounted, ref } from "vue";
 
 import * as internalCaseApi from "@/api/internalCase";
 import type { InternalCase, InternalCaseUrgency, InternalStage } from "@/types";
+import CaseTagDialog from "@/components/case/CaseTagDialog.vue";
 
 const STAGE_LABELS: Record<InternalStage, string> = {
   reserve: "线上预约",
@@ -64,6 +65,11 @@ const overrideTarget = ref<InternalCase | null>(null);
 const overrideDeadline = ref<string>("");
 const overrideNote = ref("");
 const overrideSaving = ref(false);
+
+// 标签对话框
+const tagDialogVisible = ref(false);
+const tagSubjectKey = ref("");
+const tagTitle = ref("");
 
 function stageLabel(row: InternalCase) {
   const base = STAGE_LABELS[row.stage] ?? row.stage;
@@ -173,6 +179,12 @@ async function clearOverride(row: InternalCase) {
   }
 }
 
+function openTagDialog(row: InternalCase) {
+  tagSubjectKey.value = `ext:${row.external_case_id}`;
+  tagTitle.value = caseTitle(row);
+  tagDialogVisible.value = true;
+}
+
 onMounted(refresh);
 </script>
 
@@ -256,8 +268,9 @@ onMounted(refresh);
       <el-table-column label="进入当前环节" width="130">
         <template #default="{ row }">{{ row.phase_entered_at?.slice(0, 10) ?? "-" }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="200">
+      <el-table-column label="操作" width="260">
         <template #default="{ row }">
+          <el-button size="small" @click="openTagDialog(row)">标签</el-button>
           <el-button size="small" @click="openOverrideDialog(row)">设置时效</el-button>
           <el-button v-if="row.has_override" size="small" text type="danger" @click="clearOverride(row)">
             清除覆盖
@@ -338,6 +351,8 @@ onMounted(refresh);
         </p>
       </template>
     </el-dialog>
+
+    <CaseTagDialog v-model="tagDialogVisible" :subject-key="tagSubjectKey" :title="tagTitle" />
   </div>
 </template>
 

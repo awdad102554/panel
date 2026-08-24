@@ -14,6 +14,7 @@ from app.services.internal_case_sync import SYNC_LOCK, sync_internal_cases
 from app.services.reserve_review_runner import auto_review_pending
 from app.services.time_limits import get_time_limits
 from app.db.virtual import init_virtual_db
+from app.db.mysql import init_mysql_db
 
 settings = get_settings()
 
@@ -102,6 +103,7 @@ async def _auto_review_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_virtual_db()
+    await init_mysql_db()
     task = asyncio.create_task(_sync_loop())
     pause_task = asyncio.create_task(_pause_backfill_loop())
     auto_task = asyncio.create_task(_auto_review_loop())

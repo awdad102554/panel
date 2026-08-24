@@ -1,7 +1,41 @@
 <script setup lang="ts">
+import { ElMessage } from "element-plus";
+import { onMounted, ref } from "vue";
 import { useRoute } from "vue-router";
 
+import { useUserStore } from "@/stores/user";
+
 const route = useRoute();
+const userStore = useUserStore();
+
+const nameDialogVisible = ref(false);
+const nameInput = ref("");
+const savingName = ref(false);
+
+function openNameDialog() {
+  nameInput.value = userStore.username ?? "";
+  nameDialogVisible.value = true;
+}
+
+async function saveName() {
+  const name = nameInput.value.trim();
+  if (!name) return;
+  savingName.value = true;
+  try {
+    await userStore.bind(name);
+    ElMessage.success("用户名已保存");
+    nameDialogVisible.value = false;
+  } catch {
+    ElMessage.error("用户名保存失败,请稍后重试");
+  } finally {
+    savingName.value = false;
+  }
+}
+
+onMounted(async () => {
+  await userStore.load();
+  if (!userStore.isBound) openNameDialog();
+});
 </script>
 
 <template>
@@ -10,6 +44,12 @@ const route = useRoute();
       <div class="brand">
         <span class="brand-icon">⚖</span>
         <span class="brand-text">智能办案平台</span>
+      </div>
+      <div class="header-user">
+        <el-button text class="user-chip" @click="openNameDialog">
+          <span v-if="userStore.isBound" class="user-name">👤 {{ userStore.username }}</span>
+          <span v-else class="user-name user-unset">设置用户名</span>
+        </el-button>
       </div>
     </el-header>
     <el-container class="main-body">
@@ -40,6 +80,28 @@ const route = useRoute();
         <router-view />
       </el-main>
     </el-container>
+
+    <el-dialog
+      v-model="nameDialogVisible"
+      :title="userStore.isBound ? '修改用户名' : '设置用户名'"
+      width="380px"
+    >
+      <p class="name-hint">
+        当前设备 IP:{{ userStore.ip || "-" }}。设置后,你在案件标签中的操作人将显示为此名字。
+      </p>
+      <el-input
+        v-model="nameInput"
+        maxlength="32"
+        placeholder="请输入你的名字"
+        @keyup.enter="saveName"
+      />
+      <template #footer>
+        <el-button @click="nameDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingName" :disabled="!nameInput.trim()" @click="saveName">
+          保存
+        </el-button>
+      </template>
+    </el-dialog>
   </el-container>
 </template>
 
@@ -75,6 +137,32 @@ const route = useRoute();
   font-size: 17px;
   font-weight: 700;
   letter-spacing: 2px;
+}
+
+.header-user {
+  display: flex;
+  align-items: center;
+}
+
+.user-chip {
+  padding: 4px 12px;
+  font-size: 14px;
+}
+
+.user-name {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.user-unset {
+  color: var(--accent-cyan);
+}
+
+.name-hint {
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 0 0 12px;
+  line-height: 1.6;
 }
 
 .main-body {

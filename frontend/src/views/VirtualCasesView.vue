@@ -7,6 +7,7 @@ import type { CatalogItem, Evidence, Party, VirtualCase } from "@/api/virtualCas
 import PartyAgentsEditor from "@/components/PartyAgentsEditor.vue";
 import PartyRequestsEditor, { type ReqRow } from "@/components/PartyRequestsEditor.vue";
 import VirtualCaseSubmitDialog from "@/components/VirtualCaseSubmitDialog.vue";
+import CaseTagDialog from "@/components/case/CaseTagDialog.vue";
 import { catalogItemOf, disambiguateApplicant, isMultiTemplate, pluralizeRespondent } from "@/utils/requestCatalog";
 import { composePartyFacts } from "@/utils/factCompose";
 
@@ -41,6 +42,17 @@ const submitTarget = ref<VirtualCase | null>(null);
 function openSubmit(row: VirtualCase) {
   submitTarget.value = row;
   submitVisible.value = true;
+}
+
+// 标签对话框
+const tagDialogVisible = ref(false);
+const tagSubjectKey = ref("");
+const tagTitle = ref("");
+
+function openTagDialog(row: VirtualCase) {
+  tagSubjectKey.value = `virt:${row.id}`;
+  tagTitle.value = row.receipt_number;
+  tagDialogVisible.value = true;
 }
 
 const dialogVisible = ref(false);
@@ -495,8 +507,9 @@ onMounted(refresh);
       <el-table-column label="登记时间" width="110">
         <template #default="{ row }">{{ row.created_at?.slice(0, 10) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="420">
+      <el-table-column label="操作" width="480">
         <template #default="{ row }">
+          <el-button size="small" @click="openTagDialog(row)">标签</el-button>
           <el-button size="small" @click="openEdit(row)">编辑</el-button>
           <el-button size="small" type="primary" plain @click="downloadApplication(row)">生成申请书</el-button>
           <el-button
@@ -746,6 +759,8 @@ onMounted(refresh);
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <CaseTagDialog v-model="tagDialogVisible" :subject-key="tagSubjectKey" :title="tagTitle" />
   </div>
 </template>
 

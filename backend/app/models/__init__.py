@@ -15,6 +15,8 @@ from app.models.internal_case import (
 )
 from app.models.reserve_ai_review import ReserveAIReview
 from app.models.reserve_review_decision import ReserveReviewDecision
+from app.models.case_tag import CaseTag
+from app.models.user_ip import UserIpBinding
 
 __all__ = [
     "User",
@@ -34,4 +36,6 @@ __all__ = [
     "SyncVerificationReport",
     "ReserveAIReview",
     "ReserveReviewDecision",
+    "CaseTag",
+    "UserIpBinding",
 ]

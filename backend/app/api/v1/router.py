@@ -5,6 +5,7 @@ from app.api.v1 import (
     ai_models,
     auth,
     case_portrait,
+    case_tags,
     cases,
     dashboard,
     documents,
@@ -15,6 +16,7 @@ from app.api.v1 import (
     stats,
     tianyancha,
     timeline,
+    user_bindings,
     virtual_cases,
 )
 
@@ -27,6 +29,8 @@ api_router.include_router(timeline.router)
 api_router.include_router(ai.router)
 api_router.include_router(ai_models.router)
 api_router.include_router(internal_cases.router)
+api_router.include_router(case_tags.router)
+api_router.include_router(user_bindings.router)
 api_router.include_router(reserve_review.router)
 api_router.include_router(documents.router)
 api_router.include_router(service_delivery.router)
