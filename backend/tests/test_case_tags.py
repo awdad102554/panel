@@ -78,6 +78,8 @@ def test_resolve_subject_stage_external_returns_stage_string():
     class Row:
         stage = "receive"  # stage 列是 String,读回为 str
         raw_payload = {}  # 无 next_step,不是案前调解
+        is_paused = False
+        current_step = None
 
     assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:123")) == "receive"
 
@@ -89,8 +91,65 @@ def test_resolve_subject_stage_external_returns_stage_enum_value():
     class Row:
         stage = EnumLike()
         raw_payload = {}
+        is_paused = False
+        current_step = None
 
     assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:456")) == "handle"
+
+
+def test_resolve_subject_stage_external_paused_by_flag():
+    class Row:
+        stage = "handle"
+        raw_payload = {}
+        is_paused = True
+        current_step = None
+
+    assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:999")) == "paused"
+
+
+def test_resolve_subject_stage_external_paused_by_current_step():
+    class Row:
+        stage = "handle"
+        raw_payload = {}
+        is_paused = False
+        current_step = "审理中止"
+
+    assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:1000")) == "paused"
+
+
+@pytest.mark.parametrize(
+    ("current_step", "expected"),
+    [
+        ("审理中止", "paused"),
+        ("组织调解", "mediation"),
+        ("仲裁裁决中", "deciding"),
+        ("待开庭安排", "pending_hearing"),
+        ("待开庭审理", "pending_trial"),
+        ("审理事项进行中", "in_progress"),
+        ("已结案", "closed"),
+        ("已归档", "archived"),
+    ],
+)
+def test_resolve_subject_stage_handle_substep(current_step, expected):
+    cs = current_step  # 类体作用域里 current_step = current_step 会遮蔽参数,先落本地变量
+
+    class Row:
+        stage = "handle"
+        raw_payload = {}
+        is_paused = False
+        current_step = cs
+
+    assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:900")) == expected
+
+
+def test_resolve_subject_stage_handle_unknown_substep_falls_back_to_handle():
+    class Row:
+        stage = "handle"
+        raw_payload = {}
+        is_paused = False
+        current_step = "未知子状态"
+
+    assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:901")) == "handle"
 
 
 def test_resolve_subject_stage_external_pre_mediation_next_step_int():

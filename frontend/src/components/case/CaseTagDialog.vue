@@ -18,6 +18,14 @@ const STAGE_LABELS: Record<string, string> = {
   receive: "收件审查",
   pre_mediation: "收件审查 · 案前调解",
   handle: "立案在办",
+  paused: "立案在办 · 审理中止",
+  mediation: "立案在办 · 组织调解",
+  deciding: "立案在办 · 仲裁裁决中",
+  pending_hearing: "立案在办 · 待开庭安排",
+  pending_trial: "立案在办 · 待开庭审理",
+  in_progress: "立案在办 · 审理事项进行中",
+  closed: "已结案",
+  archived: "已归档",
   virtual: "预登记",
 };
 

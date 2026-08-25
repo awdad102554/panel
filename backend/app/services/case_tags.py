@@ -12,9 +12,16 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.internal_case import InternalCaseTracking
+from app.models.internal_case import InternalCaseTracking, InternalStage
 from app.models.user_ip import UserIpBinding
-from app.services.internal_case_urgency import is_pre_mediation
+from app.services.internal_case_urgency import (
+    ARCHIVED_STEP,
+    CLOSED_STEP,
+    DECIDING_STEP,
+    MEDIATION_STEP,
+    PAUSED_STEP,
+    is_pre_mediation,
+)
 
 SUBJECT_EXT_PREFIX = "ext:"
 SUBJECT_VIRT_PREFIX = "virt:"
@@ -22,6 +29,23 @@ SUBJECT_VIRT_PREFIX = "virt:"
 # 案前调解是「收件」环节的子状态(next_step=3),记事环节单独记为 pre_mediation,
 # 前端显示为「收件审查 · 案前调解」,与纯收件(receive)区分。
 PRE_MEDIATION_STAGE = "pre_mediation"
+
+# 审理中止:handle 环节 stop=1(is_paused)或 current_step=审理中止,记事环节单独记为 paused,
+# 前端显示为「立案在办 · 审理中止」,与普通立案在办(handle)区分。
+PAUSED_STAGE = "paused"
+
+# 立案在办(handle)的 current_step → 记事环节细分码,镜像办案进度监控「环节列」的子状态。
+# current_step 枚举不封闭,未识别的子状态回落到 handle(立案在办),不报错。
+HANDLE_STEP_TO_STAGE: dict[str, str] = {
+    PAUSED_STEP: PAUSED_STAGE,          # 审理中止
+    MEDIATION_STEP: "mediation",        # 组织调解
+    DECIDING_STEP: "deciding",          # 仲裁裁决中
+    "待开庭安排": "pending_hearing",     # 待开庭安排
+    "待开庭审理": "pending_trial",       # 待开庭审理
+    "审理事项进行中": "in_progress",     # 审理事项进行中
+    CLOSED_STEP: "closed",              # 已结案
+    ARCHIVED_STEP: "archived",          # 已归档
+}
 
 
 def subject_key_for_external(external_case_id: str) -> str:
@@ -39,7 +63,9 @@ async def resolve_subject_stage(db: AsyncSession, subject_key: str) -> str:
 
     环节用于给新记事打「所在环节」标记:
     - ext:{case_id} → 内网快照当前 stage(reserve/receive/handle),
-      其中收件且 next_step=3(案前调解)细化为 "pre_mediation";
+      其中收件且 next_step=3(案前调解)细化为 "pre_mediation",
+      立案在办(handle)按 current_step 细化为 paused/mediation/deciding/pending_hearing/
+      pending_trial/in_progress/closed/archived(未识别回落到 handle);
     - virt:{id}    → 固定 "virtual"(预登记,不在主库快照)。
     案件不存在抛 LookupError(调用方转 404);subject_key 非法抛 ValueError(转 400)。
     注意:db 是 panel 的 PG 会话(读快照),不是 MySQL 会话。
@@ -59,6 +85,14 @@ async def resolve_subject_stage(db: AsyncSession, subject_key: str) -> str:
             raise LookupError("内网案件不存在")
         if is_pre_mediation(row):
             return PRE_MEDIATION_STAGE
+        if row.stage == InternalStage.HANDLE:
+            if row.current_step:
+                mapped = HANDLE_STEP_TO_STAGE.get(row.current_step)
+                if mapped:
+                    return mapped
+            # 兼容旧口径:stop=1 但 current_step 未识别时,仍记为审理中止。
+            if row.is_paused:
+                return PAUSED_STAGE
         stage = row.stage
         return stage.value if hasattr(stage, "value") else str(stage)
 

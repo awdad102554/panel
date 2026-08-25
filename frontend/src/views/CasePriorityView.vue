@@ -254,6 +254,12 @@ onMounted(refresh);
       <el-table-column label="案号 / 当事人" width="220">
         <template #default="{ row }">{{ caseTitle(row) }}</template>
       </el-table-column>
+      <el-table-column label="申请人" width="120" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.applicant ?? "-" }}</template>
+      </el-table-column>
+      <el-table-column label="被申请人" width="180" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.respondent ?? "-" }}</template>
+      </el-table-column>
       <el-table-column label="环节" width="200">
         <template #default="{ row }">{{ stageLabel(row) }}</template>
       </el-table-column>
@@ -281,9 +287,6 @@ onMounted(refresh);
             {{ urgencyLabel(row) }}
           </el-tag>
         </template>
-      </el-table-column>
-      <el-table-column label="结案方式" width="110">
-        <template #default="{ row }">{{ row.end_way ?? "-" }}</template>
       </el-table-column>
       <el-table-column label="进入当前环节" width="130">
         <template #default="{ row }">{{ row.phase_entered_at?.slice(0, 10) ?? "-" }}</template>
