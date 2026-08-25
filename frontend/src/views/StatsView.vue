@@ -271,6 +271,10 @@ onBeforeUnmount(() => {
         <div class="kpi-value">{{ overview ? formatRate(overview.kpis.mediation_rate) : "-" }}</div>
         <div class="kpi-label">调解率</div>
       </div>
+      <div class="kpi-card accent-green">
+        <div class="kpi-value">{{ overview ? formatRate(overview.kpis.mediation_withdrawal_rate) : "-" }}</div>
+        <div class="kpi-label">调撤率</div>
+      </div>
       <div class="kpi-card accent-amber">
         <div class="kpi-value">{{ overview ? `${overview.kpis.avg_duration_days} 天` : "-" }}</div>
         <div class="kpi-label">平均审理时长</div>

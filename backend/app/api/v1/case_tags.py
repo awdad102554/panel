@@ -1,4 +1,4 @@
-"""案件标签路由:按案件线程(subject_key)追加标签,只增不改,与 InfoWeb 共用。
+"""案件记事本路由:按案件线程(subject_key)追加记事,只增不改,与 InfoWeb 共用。
 
 subject_key 见 services/case_tags.py:ext:{内网 case_id} / virt:{预登记 id}。
 时间(created_at)/设备IP(client_ip)/环节(stage)/操作人(operator=IP→用户名)服务端自动落,内容用户填。
@@ -74,7 +74,7 @@ async def list_tags(
     mysql_db: AsyncSession = Depends(get_mysql_db),
     _current_user: User = Depends(get_current_user),
 ) -> list[TagOut]:
-    """列出某案件线程的全部标签(时间正序,像时间线);案件已删时标签仍可读。"""
+    """列出某案件线程的全部记事(时间正序,像时间线);案件已删时记事仍可读。"""
     stmt = (
         select(CaseTag)
         .where(CaseTag.subject_key == subject_key)
@@ -92,15 +92,15 @@ async def create_tag(
     mysql_db: AsyncSession = Depends(get_mysql_db),
     _current_user: User = Depends(get_current_user),
 ) -> TagOut:
-    """新增一条标签:内容用户填,时间/IP/环节/操作人服务端自动落。
+    """新增一条记事:内容用户填,时间/IP/环节/操作人服务端自动落。
 
     环节从 PG 快照解析;操作人由客户端 IP 查 user_ip 绑定而来,未绑定则要求先设置用户名。
     """
     content = (payload.content or "").strip()
     if not content:
-        raise HTTPException(status_code=422, detail="标签内容不能为空")
+        raise HTTPException(status_code=422, detail="记事内容不能为空")
     if len(content) > MAX_CONTENT_LEN:
-        raise HTTPException(status_code=422, detail=f"标签内容过长(最多 {MAX_CONTENT_LEN} 字)")
+        raise HTTPException(status_code=422, detail=f"记事内容过长(最多 {MAX_CONTENT_LEN} 字)")
 
     try:
         stage = await resolve_subject_stage(pg_db, subject_key)

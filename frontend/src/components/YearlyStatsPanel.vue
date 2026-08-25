@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import * as echarts from "echarts";
 import { ElMessage } from "element-plus";
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 
 import * as statsApi from "@/api/stats";
 import type { YearlyStats } from "@/types";
@@ -88,6 +88,9 @@ function formatRate(rate: number) {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
+// 统计年度(12-10~次年12-10)标签:2026年度 = 2025-12-10 ~ 2026-12-10。
+const statRangeLabel = computed(() => `${selectedYear.value - 1}-12-10 ~ ${selectedYear.value}-12-10`);
+
 function resize() {
   chart?.resize();
 }
@@ -108,37 +111,79 @@ onBeforeUnmount(() => {
   <div class="chart-card">
     <h3 class="year-panel-header">
       年度数据
-      <el-select v-model="selectedYear" size="small" style="width: 110px" @change="loadYear">
+      <el-select v-model="selectedYear" size="small" style="width: 110px" :teleported="false" @change="loadYear">
         <el-option v-for="y in availableYears" :key="y" :label="`${y} 年`" :value="y" />
       </el-select>
     </h3>
     <div v-loading="loading">
-      <div v-if="yearly" class="year-kpis">
-        <div
-          class="year-kpi clickable"
-          title="点击查看该年立案案件"
-          @click="emit('show-cases', { title: `${selectedYear}年立案案件`, kind: 'filed_year', value: String(selectedYear) })"
-        >
-          <span class="year-kpi-value accent-text-blue">{{ yearly.filed }}</span>
-          <span class="year-kpi-label">立案</span>
+      <template v-if="yearly">
+        <div v-if="yearly.stat_year" class="year-row">
+          <div class="year-row-label">统计年度（{{ statRangeLabel }}）</div>
+          <div class="year-kpis">
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-blue">{{ yearly.stat_year.filed }}</span>
+              <span class="year-kpi-label">立案</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.closed }}</span>
+              <span class="year-kpi-label">结案</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.stat_year.mediation_rate) }}</span>
+              <span class="year-kpi-label">调解率</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.stat_year.mediation_withdrawal_rate) }}</span>
+              <span class="year-kpi-label">调撤率</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-amber">{{ formatRate(yearly.stat_year.final_ruling_rate) }}</span>
+              <span class="year-kpi-label">一裁终局率</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-amber">{{ yearly.stat_year.avg_duration_days }} 天</span>
+              <span class="year-kpi-label">平均审理时长</span>
+            </div>
+          </div>
         </div>
-        <div
-          class="year-kpi clickable"
-          title="点击查看该年结案案件"
-          @click="emit('show-cases', { title: `${selectedYear}年结案案件`, kind: 'closed_year', value: String(selectedYear) })"
-        >
-          <span class="year-kpi-value accent-text-green">{{ yearly.closed }}</span>
-          <span class="year-kpi-label">结案</span>
+        <div class="year-row">
+          <div class="year-row-label">自然年度</div>
+          <div class="year-kpis">
+            <div
+              class="year-kpi clickable"
+              title="点击查看该年立案案件"
+              @click="emit('show-cases', { title: `${selectedYear}年立案案件`, kind: 'filed_year', value: String(selectedYear) })"
+            >
+              <span class="year-kpi-value accent-text-blue">{{ yearly.filed }}</span>
+              <span class="year-kpi-label">立案</span>
+            </div>
+            <div
+              class="year-kpi clickable"
+              title="点击查看该年结案案件"
+              @click="emit('show-cases', { title: `${selectedYear}年结案案件`, kind: 'closed_year', value: String(selectedYear) })"
+            >
+              <span class="year-kpi-value accent-text-green">{{ yearly.closed }}</span>
+              <span class="year-kpi-label">结案</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.mediation_rate) }}</span>
+              <span class="year-kpi-label">调解率</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.mediation_withdrawal_rate) }}</span>
+              <span class="year-kpi-label">调撤率</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-amber">{{ formatRate(yearly.final_ruling_rate) }}</span>
+              <span class="year-kpi-label">一裁终局率</span>
+            </div>
+            <div class="year-kpi">
+              <span class="year-kpi-value accent-text-amber">{{ yearly.avg_duration_days }} 天</span>
+              <span class="year-kpi-label">平均审理时长</span>
+            </div>
+          </div>
         </div>
-        <div class="year-kpi">
-          <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.mediation_rate) }}</span>
-          <span class="year-kpi-label">调解率</span>
-        </div>
-        <div class="year-kpi">
-          <span class="year-kpi-value accent-text-amber">{{ yearly.avg_duration_days }} 天</span>
-          <span class="year-kpi-label">平均审理时长</span>
-        </div>
-      </div>
+      </template>
       <div ref="chartRef" class="chart-body" />
     </div>
   </div>
@@ -162,11 +207,21 @@ onBeforeUnmount(() => {
   color: var(--el-text-color-primary);
 }
 
+.year-row {
+  margin-bottom: 10px;
+}
+
+.year-row-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin: 0 0 6px;
+}
+
 .year-kpis {
   display: grid;
-  grid-template-columns: repeat(4, 160px);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 16px;
-  padding: 8px 0 12px;
+  padding: 4px 0 10px;
 }
 
 .year-kpi {

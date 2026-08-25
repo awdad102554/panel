@@ -1,4 +1,4 @@
-"""案件标签 + IP→用户名绑定单测:subject_key 构造、客户端 IP 提取、subject 解析、用户名绑定,不打真 DB。"""
+"""案件记事本 + IP→用户名绑定单测:subject_key 构造、客户端 IP 提取、subject 解析、用户名绑定,不打真 DB。"""
 
 import asyncio
 

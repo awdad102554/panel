@@ -357,3 +357,38 @@ def test_map_record_accepts_string_stage():
     by_str = _map_record("handle", raw)  # type: ignore[arg-type] 快照读回即字符串
     assert by_str["current_step"] == by_enum["current_step"] == "已结案"
     assert by_str["end_way"] == by_enum["end_way"] == "调解"
+
+
+def test_map_record_receive_pre_mediation_sets_current_step():
+    """收件 next_step=3(案前调解)给 current_step 打标"案前调解",供总览卡片与明细展示。"""
+    from app.services.internal_case_sync import _map_record
+
+    mapped = _map_record(InternalStage.RECEIVE, {"case_id": 1, "next_step": 3})
+    assert mapped["current_step"] == "案前调解"
+
+    mapped = _map_record(InternalStage.RECEIVE, {"case_id": 1, "next_step": 4})
+    assert mapped["current_step"] is None
+
+
+@pytest.mark.asyncio
+async def test_pre_mediation_disappeared_is_probed_not_skipped():
+    """案前调解(status=3, next_step=3)消失时应探测而非跳过;找到仍案前调解则更新,
+    不再被 status!=0 直接 continue(2026-08-24 新增)。"""
+    prev = _tracking("601", case_no="明永劳人仲收[2026]301号", status=3)
+    prev.raw_payload["next_step"] = 3
+    found = {
+        "case_id": "601",
+        "case_no": "明永劳人仲收[2026]301号",
+        "status": 3,
+        "next_step": 3,
+        "application_at": "2026-08-06 10:00:00",
+    }
+    client = FakeClient({(RECEIVE_PATH, "case_no=[2026]301"): [found]})
+    merged: dict[str, dict] = {}
+
+    refetched, deleted = await _refetch_disappeared(client, {"601": prev}, merged, reserve_complete=True)
+
+    assert refetched == 1
+    assert deleted == []
+    assert merged["601"]["stage"] == InternalStage.RECEIVE
+    assert merged["601"]["current_step"] == "案前调解"

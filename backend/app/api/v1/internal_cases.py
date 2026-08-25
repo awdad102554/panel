@@ -28,12 +28,15 @@ from app.schemas.internal_case import (
     SyncResultOut,
 )
 from app.services.internal_case_sync import SYNC_LOCK, sync_internal_cases, verify_consistency
+from app.services.pre_mediation_binding import load_bound_receive_ids
 from app.services.time_limits import effective_settings
 from app.services.internal_case_urgency import (
     ARCHIVED_STEP,
     CLOSED_STEP,
     UrgencyResult,
     compute_urgency,
+    is_pre_mediation,
+    pre_mediation_entered_at,
     sort_days_key,
 )
 
@@ -75,6 +78,7 @@ def _build_out(
         end_at=row.end_at,
         end_way=row.end_way,
         phase_entered_at=row.phase_entered_at,
+        state_entered_at=pre_mediation_entered_at(payload) if is_pre_mediation(row) else None,
         last_synced_at=row.last_synced_at,
         urgency=urgency.urgency,
         days_remaining=urgency.days_remaining,
@@ -103,9 +107,13 @@ async def list_internal_cases(
         stmt = stmt.where(InternalCaseTracking.stage == stage)
     rows = (await db.execute(stmt)).scalars().all()
     overrides = await _load_overrides(db)
+    # 已绑定立案的案前调解(进入下一阶段)不再单独显示:立案后由 handle 记录承接。
+    bound_receive_ids = await load_bound_receive_ids(db)
 
     items: list[tuple[UrgencyResult, InternalCaseOut]] = []
     for row in rows:
+        if row.stage == InternalStage.RECEIVE and row.external_case_id in bound_receive_ids:
+            continue
         override = overrides.get(row.external_case_id)
         result = compute_urgency(row, override, settings)
         if result.urgency in ("closed", "rejected") and not include_closed:

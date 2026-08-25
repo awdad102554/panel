@@ -17,6 +17,7 @@ from app.models.reserve_ai_review import ReserveAIReview
 from app.models.reserve_review_decision import ReserveReviewDecision
 from app.models.case_tag import CaseTag
 from app.models.user_ip import UserIpBinding
+from app.models.pre_mediation_binding import PreMediationBinding
 
 __all__ = [
     "User",
@@ -38,4 +39,5 @@ __all__ = [
     "ReserveReviewDecision",
     "CaseTag",
     "UserIpBinding",
+    "PreMediationBinding",
 ]

@@ -1,6 +1,6 @@
 import { apiClient } from "@/api/client";
 
-/** 案件标签(时间/设备IP/环节/操作人服务端自动落,内容用户填)。 */
+/** 案件记事本(时间/设备IP/环节/操作人服务端自动落,内容用户填)。 */
 export interface CaseTag {
   id: string;
   subject_key: string;

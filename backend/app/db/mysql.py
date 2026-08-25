@@ -1,6 +1,6 @@
-"""共享 MySQL 连接(与 InfoWeb 同库,存案件标签 case_tags + IP→用户名绑定 user_ip)。
+"""共享 MySQL 连接(与 InfoWeb 同库,存案件记事本 case_tags + IP→用户名绑定 user_ip)。
 
-panel 主库是 PostgreSQL(asyncpg),但案件标签/IP 绑定要跟 InfoWeb 共用同一张表,
+panel 主库是 PostgreSQL(asyncpg),但案件记事本/IP 绑定要跟 InfoWeb 共用同一张表,
 故另起一条 MySQL 异步连接。表结构由 get_mysql_engine + Base.metadata.create_all
 在启动时幂等创建(InfoWeb 侧 database_schema.py 也 CREATE TABLE IF NOT EXISTS)。
 """

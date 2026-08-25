@@ -8,7 +8,7 @@
 
 import logging
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,7 @@ from app.api.v1.dashboard import (
     _as_local_date,
     _case_duration_days,
     _duration_bucket,
+    _filed_date,
     _is_over_statutory_limit,
     _last_12_months,
     _LOCAL_TZ,
@@ -57,52 +58,93 @@ async def _live_totals() -> tuple[int, int] | None:
         return None
 
 
-def _aggregate_years(rows) -> tuple[dict[int, dict], list[int]]:
-    """按自然年聚合:立案(handle_at 年)、结案(end_at 年)、调解率、审理时长、逐月数据。
+# 一裁终局口径:end_way_detail 里"部分终局/一裁终局"都算终局(工作人员 2026-08-25 确认)。
+_FINAL_RULING_DETAILS = {"部分终局", "一裁终局"}
+# 统计年度边界:12月10日~次年12月10日为一个统计年度,标签用结束年。
+_STAT_MONTH = 12
+_STAT_DAY = 10
 
-    返回 (年份 -> 聚合 dict, 有数据的年份升序列表)。数据来自内网全量历史快照。
+
+def _stat_year(d: date) -> int:
+    """统计年度标签(结束年):2026年度 = 2025-12-10 ~ 2026-12-10。"""
+    return d.year + 1 if (d.month, d.day) >= (_STAT_MONTH, _STAT_DAY) else d.year
+
+
+def _is_final_ruling(detail) -> bool:
+    return isinstance(detail, str) and detail in _FINAL_RULING_DETAILS
+
+
+def _aggregate(rows, year_fn, with_monthly: bool) -> dict[int, dict]:
+    """按 year_fn(本地日期) 聚合立案/结案/调解/撤回/裁决/终局/审理时长。
+
+    调撤率分子 = 调解(end_way="调解") + 撤回(end_way="撤回");
+    一裁终局率分子 = end_way_detail ∈ {部分终局, 一裁终局},分母 = end_way="裁决"。
     """
-    years: dict[int, dict] = {}
+    buckets: dict[int, dict] = {}
 
     def bucket(y: int) -> dict:
-        return years.setdefault(
+        b = buckets.setdefault(
             y,
             {
                 "filed": 0,
                 "closed": 0,
                 "mediated": 0,
+                "withdrawn": 0,
+                "ruled": 0,
+                "final": 0,
                 "with_end_way": 0,
                 "durations": [],
-                "monthly_filed": [0] * 12,
-                "monthly_closed": [0] * 12,
             },
         )
+        if with_monthly:
+            b.setdefault("monthly_filed", [0] * 12)
+            b.setdefault("monthly_closed", [0] * 12)
+        return b
 
     for row, _result in rows:
         if row.stage != InternalStage.HANDLE:
             continue
-        handle_at = (row.raw_payload or {}).get("handle_at")
-        if isinstance(handle_at, str) and len(handle_at) >= 7:
-            try:
-                year, month = int(handle_at[:4]), int(handle_at[5:7])
-            except ValueError:
-                year = 0
-            if 2000 <= year <= 2100 and 1 <= month <= 12:
-                b = bucket(year)
-                b["filed"] += 1
-                b["monthly_filed"][month - 1] += 1
+        payload = row.raw_payload or {}
+        filed = _filed_date(row)
+        if filed is not None:
+            b = bucket(year_fn(filed))
+            b["filed"] += 1
+            if with_monthly:
+                b["monthly_filed"][filed.month - 1] += 1
         if row.current_step in (CLOSED_STEP, ARCHIVED_STEP) and row.end_at is not None:
             end = _as_local_date(row.end_at)
-            b = bucket(end.year)
+            b = bucket(year_fn(end))
             b["closed"] += 1
-            b["monthly_closed"][end.month - 1] += 1
+            if with_monthly:
+                b["monthly_closed"][end.month - 1] += 1
             if row.end_way:
                 b["with_end_way"] += 1
                 if row.end_way == "调解":
                     b["mediated"] += 1
+                elif row.end_way == "撤回":
+                    b["withdrawn"] += 1
+                elif row.end_way == "裁决":
+                    b["ruled"] += 1
+                    if _is_final_ruling(payload.get("end_way_detail")):
+                        b["final"] += 1
             duration = _case_duration_days(row)
             if duration is not None:
                 b["durations"].append(duration)
+    return buckets
+
+
+def _aggregate_years(rows) -> tuple[dict[int, dict], list[int]]:
+    """按自然年聚合(立案 handle_at 年、结案 end_at 年 + 逐月数据)。
+
+    返回 (年份 -> 聚合 dict, 有数据的年份升序列表)。数据来自内网全量历史快照。
+    """
+    years = _aggregate(rows, lambda d: d.year, with_monthly=True)
+    return years, sorted(years)
+
+
+def _aggregate_stat_years(rows) -> tuple[dict[int, dict], list[int]]:
+    """按统计年度(12-10~次年12-10)聚合,无逐月数据(仅 KPI 行)。"""
+    years = _aggregate(rows, _stat_year, with_monthly=False)
     return years, sorted(years)
 
 
@@ -110,11 +152,16 @@ def _to_year_stats(year: int, agg: dict | None) -> YearStats:
     agg = agg or {}
     durations = agg.get("durations") or []
     with_end_way = agg.get("with_end_way", 0)
+    ruled = agg.get("ruled", 0)
     return YearStats(
         year=year,
         filed=agg.get("filed", 0),
         closed=agg.get("closed", 0),
         mediation_rate=round(agg.get("mediated", 0) / with_end_way, 4) if with_end_way else 0,
+        mediation_withdrawal_rate=round(
+            (agg.get("mediated", 0) + agg.get("withdrawn", 0)) / with_end_way, 4
+        ) if with_end_way else 0,
+        final_ruling_rate=round(agg.get("final", 0) / ruled, 4) if ruled else 0,
         avg_duration_days=round(sum(durations) / len(durations), 1) if durations else 0,
     )
 
@@ -195,6 +242,7 @@ async def get_stats_overview(
                 duration_buckets[_duration_bucket(duration)] += 1
 
     mediated = end_ways.get("调解", 0)
+    withdrawn = end_ways.get("撤回", 0)
     with_end_way = sum(end_ways.values())
     kpis = StatsKpis(
         receive_total=live[0] if live else receive_stage,
@@ -202,6 +250,7 @@ async def get_stats_overview(
         open_cases=open_cases,
         closed_cases=closed_cases,
         mediation_rate=round(mediated / with_end_way, 4) if with_end_way else 0,
+        mediation_withdrawal_rate=round((mediated + withdrawn) / with_end_way, 4) if with_end_way else 0,
         avg_duration_days=round(sum(durations) / len(durations), 1) if durations else 0,
         overdue_cases=overdue_cases,
         over_limit_open=over_limit_open,
@@ -244,7 +293,10 @@ async def get_yearly_stats(
     db: AsyncSession = Depends(get_db),
     _current_user=Depends(get_current_user),
 ) -> YearlyStatsOut:
-    """单一年份的案件统计(年度数据区):该年立案/结案/调解率/审理时长与逐月数据。"""
+    """单一年份的案件统计(年度数据区):该年立案/结案/调解率/调撤率/一裁终局率/审理时长。
+
+    同时返回同标签的统计年度(12-10~次年12-10)汇总,前端并列展示两行。
+    """
     rows = await _snapshot_rows(db, await effective_settings(db))
     if rows is None:
         return YearlyStatsOut(year=year, monthly_filed=[0] * 12, monthly_closed=[0] * 12)
@@ -252,13 +304,20 @@ async def get_yearly_stats(
     years, available = _aggregate_years(rows)
     agg = years.get(year) or {}
     base = _to_year_stats(year, agg)
+
+    stat_years, stat_available = _aggregate_stat_years(rows)
+    stat_year = _to_year_stats(year, stat_years.get(year) or {})
+
     return YearlyStatsOut(
         year=year,
         filed=base.filed,
         closed=base.closed,
         mediation_rate=base.mediation_rate,
+        mediation_withdrawal_rate=base.mediation_withdrawal_rate,
+        final_ruling_rate=base.final_ruling_rate,
         avg_duration_days=base.avg_duration_days,
         monthly_filed=agg.get("monthly_filed", [0] * 12),
         monthly_closed=agg.get("monthly_closed", [0] * 12),
-        available_years=available,
+        available_years=sorted(set(available) | set(stat_available)),
+        stat_year=stat_year,
     )

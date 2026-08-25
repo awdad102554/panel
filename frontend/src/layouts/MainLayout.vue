@@ -87,7 +87,7 @@ onMounted(async () => {
       width="380px"
     >
       <p class="name-hint">
-        当前设备 IP:{{ userStore.ip || "-" }}。设置后,你在案件标签中的操作人将显示为此名字。
+        当前设备 IP:{{ userStore.ip || "-" }}。设置后,你在案件记事本中的操作人将显示为此名字。
       </p>
       <el-input
         v-model="nameInput"

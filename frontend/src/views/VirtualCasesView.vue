@@ -44,7 +44,7 @@ function openSubmit(row: VirtualCase) {
   submitVisible.value = true;
 }
 
-// 标签对话框
+// 记事本对话框
 const tagDialogVisible = ref(false);
 const tagSubjectKey = ref("");
 const tagTitle = ref("");
@@ -509,7 +509,7 @@ onMounted(refresh);
       </el-table-column>
       <el-table-column label="操作" width="480">
         <template #default="{ row }">
-          <el-button size="small" @click="openTagDialog(row)">标签</el-button>
+          <el-button size="small" @click="openTagDialog(row)">记事本</el-button>
           <el-button size="small" @click="openEdit(row)">编辑</el-button>
           <el-button size="small" type="primary" plain @click="downloadApplication(row)">生成申请书</el-button>
           <el-button

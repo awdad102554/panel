@@ -66,7 +66,7 @@ const overrideDeadline = ref<string>("");
 const overrideNote = ref("");
 const overrideSaving = ref(false);
 
-// 标签对话框
+// 记事本对话框
 const tagDialogVisible = ref(false);
 const tagSubjectKey = ref("");
 const tagTitle = ref("");
@@ -76,9 +76,13 @@ function stageLabel(row: InternalCase) {
   return row.current_step ? `${base} · ${row.current_step}` : base;
 }
 
+// 案前调解(收件审核通过,next_step=3)已生成正式收件号;待审核/保存未审批的收件案号是编码。
+const PRE_MEDIATION_STEP = "案前调解";
+
 function caseTitle(row: InternalCase) {
-  // 收件阶段案号是编码、线上预约尚未生成案号,均改用申请人/被申请人展示。
-  if (row.stage === "receive" || row.stage === "reserve") {
+  // 收件阶段待审核案号是编码、线上预约尚未生成案号,均改用申请人/被申请人展示;
+  // 案前调解已有正式收件号,改显收件号。
+  if (row.stage === "reserve" || (row.stage === "receive" && row.current_step !== PRE_MEDIATION_STEP)) {
     const applicant = row.applicant ?? "?";
     const respondent = row.respondent ?? "?";
     return `${applicant} → ${respondent}`;
@@ -86,9 +90,23 @@ function caseTitle(row: InternalCase) {
   return row.case_no ?? row.external_case_id;
 }
 
+// 案前调解:进入调解已过自然日数(按本地自然日,与后端 CST 口径一致)。
+function stateEnteredDays(row: InternalCase) {
+  const s = row.state_entered_at ?? "";
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const entered = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  return Math.round((today.getTime() - entered.getTime()) / 86400000);
+}
+
 function remainingLabel(row: InternalCase) {
   // 中止案件没有"剩余审理时间"口径(中止天数已在紧急度列显示),剩余时间列显示 -。
   if (row.urgency === "paused" || row.urgency === "paused_overdue") return "-";
+  // 案前调解没有"剩余/超期天数"口径,该列改显进入调解已过天数。
+  const enteredDays = stateEnteredDays(row);
+  if (enteredDays !== null) return `已进入 ${enteredDays} 天`;
   if (row.days_remaining === null) return "-";
   if (row.days_remaining < 0) return `已超期 ${-row.days_remaining} 天`;
   return `剩 ${row.days_remaining} 天`;
@@ -200,6 +218,7 @@ onMounted(refresh);
         v-model="stageFilter"
         placeholder="按环节筛选"
         clearable
+        :teleported="false"
         style="width: 150px"
         @change="refresh"
       >
@@ -210,6 +229,7 @@ onMounted(refresh);
         v-model="urgencyFilter"
         placeholder="按紧急度筛选"
         clearable
+        :teleported="false"
         style="width: 150px"
         @change="refresh"
       >
@@ -270,7 +290,7 @@ onMounted(refresh);
       </el-table-column>
       <el-table-column label="操作" width="260">
         <template #default="{ row }">
-          <el-button size="small" @click="openTagDialog(row)">标签</el-button>
+          <el-button size="small" @click="openTagDialog(row)">记事本</el-button>
           <el-button size="small" @click="openOverrideDialog(row)">设置时效</el-button>
           <el-button v-if="row.has_override" size="small" text type="danger" @click="clearOverride(row)">
             清除覆盖

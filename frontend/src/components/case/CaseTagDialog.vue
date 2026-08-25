@@ -42,7 +42,7 @@ async function load() {
   try {
     tags.value = await caseTagApi.listCaseTags(props.subjectKey);
   } catch {
-    ElMessage.error("标签加载失败,请稍后重试");
+    ElMessage.error("记事本加载失败,请稍后重试");
   } finally {
     loading.value = false;
   }
@@ -58,7 +58,7 @@ async function add() {
     await load();
   } catch (err) {
     const status = (err as { response?: { status?: number } })?.response?.status;
-    ElMessage.error(status === 409 ? "请先在右上角设置用户名" : "标签保存失败,请稍后重试");
+    ElMessage.error(status === 409 ? "请先在右上角设置用户名" : "记事保存失败,请稍后重试");
   } finally {
     saving.value = false;
   }
@@ -78,12 +78,12 @@ watch(
 <template>
   <el-dialog
     :model-value="modelValue"
-    :title="`标签 · ${title}`"
+    :title="`记事本 · ${title}`"
     width="640px"
     @update:model-value="emit('update:modelValue', $event)"
   >
     <div v-loading="loading" class="tag-list">
-      <el-empty v-if="!loading && tags.length === 0" description="暂无标签" :image-size="60" />
+      <el-empty v-if="!loading && tags.length === 0" description="暂无记事" :image-size="60" />
       <div v-for="n in tags" :key="n.id" class="tag-item">
         <div class="tag-meta">
           <span class="tag-time">{{ formatTime(n.created_at) }}</span>
@@ -102,7 +102,7 @@ watch(
         :rows="3"
         maxlength="2000"
         show-word-limit
-        placeholder="输入标签内容…(保存后不可修改)"
+        placeholder="输入记事内容…(保存后不可修改)"
       />
       <el-button
         type="primary"
@@ -111,7 +111,7 @@ watch(
         style="margin-top: 8px; align-self: flex-end"
         @click="add"
       >
-        添加标签
+        添加记事
       </el-button>
     </div>
 

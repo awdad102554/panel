@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     database_url: str = "postgresql+asyncpg://panel:panel@localhost:5432/panel"
 
-    # MySQL(与 InfoWeb 共享:案件标签 case_tags + IP→用户名绑定 user_ip)。
+    # MySQL(与 InfoWeb 共享:案件记事本 case_tags + IP→用户名绑定 user_ip)。
     # 敏感口令默认空,真实值必须由 backend/.env 提供(MYSQL_PASSWORD),不落仓库。
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     case_urgency_urgent_days: int = 1  # handle 阶段:剩余审理天数≤多少天升级"紧急"(需小于临近阈值)
     case_urgency_paused_alert_days: int = 15  # 审理中止:暂停超过多少天需要提醒(标"中止XX天")
     case_mediation_alert_days: int = 30  # 组织调解:进入调解环节超过多少天需提醒(约一个月)
+    pre_mediation_soon_days: int = 30  # 案前调解:进入调解满 30 天标"临近"
+    pre_mediation_urgent_days: int = 45  # 案前调解:进入调解满 45 天标"紧急/警告"(需大于临近阈值)
 
     # 预登记案件警告阈值(按登记后的自然日数):超过临近阈值标"临近",超过紧急阈值标"紧急"。
     virtual_case_soon_days: int = 30  # 预登记临近阈值(天)

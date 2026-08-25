@@ -57,6 +57,8 @@ export interface InternalCase {
   end_at: string | null;
   end_way: string | null;
   phase_entered_at: string;
+  /** 进入当前子状态的时间(仅案前调解=审核通过 review_at;其余为 null),明细列表显示"进入状态时间" */
+  state_entered_at: string | null;
   last_synced_at: string;
   /** 服务端读取时实时计算的紧急度 */
   urgency: InternalCaseUrgency;
@@ -99,6 +101,11 @@ export interface DashboardSummary {
   hearings_upcoming: number;
   pending_mediation: number;
   pending_receive: number;
+  pre_mediation: number;
+  /** 其中进入调解满 30 天(临近)的案件数 */
+  pre_mediation_soon: number;
+  /** 其中进入调解满 45 天(紧急)的案件数 */
+  pre_mediation_urgent: number;
   open_cases: number;
   heard_awaiting_decision: number;
   paused_long: number;
@@ -132,6 +139,7 @@ export interface StatsKpis {
   open_cases: number;
   closed_cases: number;
   mediation_rate: number;
+  mediation_withdrawal_rate: number;
   avg_duration_days: number;
   overdue_cases: number;
   over_limit_open: number;
@@ -150,6 +158,8 @@ export interface YearStats {
   filed: number;
   closed: number;
   mediation_rate: number;
+  mediation_withdrawal_rate: number;
+  final_ruling_rate: number;
   avg_duration_days: number;
 }
 
@@ -167,10 +177,13 @@ export interface YearlyStats {
   filed: number;
   closed: number;
   mediation_rate: number;
+  mediation_withdrawal_rate: number;
+  final_ruling_rate: number;
   avg_duration_days: number;
   monthly_filed: number[];
   monthly_closed: number[];
   available_years: number[];
+  stat_year: YearStats | null;
 }
 
 export interface StatsOverview {

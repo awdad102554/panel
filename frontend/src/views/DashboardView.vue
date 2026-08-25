@@ -4,6 +4,7 @@ import {
   Calendar,
   Checked,
   ChatDotRound,
+  ChatLineRound,
   CircleCheck,
   Folder,
   List,
@@ -26,15 +27,23 @@ const summary = ref<DashboardSummary | null>(null);
 const urgentDays = ref(1);
 const soonDays = ref(3);
 const pausedAlertDays = ref(15);
+const preMediationSoonDays = ref(30);
+const preMediationUrgentDays = ref(45);
 
 const today = computed(() =>
   new Date().toLocaleDateString("zh-CN", { year: "numeric", month: "long", day: "numeric", weekday: "long" }),
 );
 
+// 案前调解卡片右上角分档提醒:临近/紧急计数,任一为 0 不显示对应徽标,两者都为 0 时整组不显示。
+const preMediationSoon = computed(() => summary.value?.pre_mediation_soon ?? 0);
+const preMediationUrgent = computed(() => summary.value?.pre_mediation_urgent ?? 0);
+const showPreMediationBadge = computed(() => preMediationSoon.value > 0 || preMediationUrgent.value > 0);
+
 const cards = [
   { key: "due_reminders", label: "时效提醒", icon: AlarmClock, accent: "red" },
   { key: "hearings_upcoming", label: "近日开庭", icon: Calendar, accent: "cyan" },
   { key: "pending_receive", label: "待办案件", icon: List, accent: "cyan" },
+  { key: "pre_mediation", label: "案前调解", icon: ChatLineRound, accent: "cyan" },
   { key: "open_cases", label: "在办案件", icon: Folder, accent: "blue" },
   { key: "pending_mediation", label: "待调解", icon: ChatDotRound, accent: "blue" },
   { key: "heard_awaiting_decision", label: "已开庭待裁决", icon: Checked, accent: "green" },
@@ -50,6 +59,7 @@ type CardKey = (typeof cards)[number]["key"];
 const CARD_HINTS = computed<Partial<Record<CardKey, string>>>(() => ({
   due_reminders: `时效维度需要处理的事项:已超期(含审批退回需返工的案件)、紧急(剩${urgentDays.value}天内)、临近(剩${soonDays.value}天内)。`,
   pending_receive: "收件环节/线上预约待审核、尚未立案的案件,以及待录入内网的预登记案件;已处理/已退回的收件、预约和已录入的预登记不在此列。",
+  pre_mediation: `收件审核通过后进入案前调解的案件;进入调解满 ${preMediationSoonDays.value} 天标"临近"、满 ${preMediationUrgentDays.value} 天标"紧急"。`,
   open_cases: "已立案、尚未结案的全部在办案件(含中止/调解/裁决中等子状态),按紧急度排序。",
   paused_long: `审理中止超过 ${pausedAlertDays.value} 天阈值的案件,需要跟进是否恢复审理。`,
 }));
@@ -108,6 +118,8 @@ onMounted(async () => {
       if (item.key === "case_urgency_urgent_days") urgentDays.value = item.value;
       else if (item.key === "case_urgency_soon_days") soonDays.value = item.value;
       else if (item.key === "case_urgency_paused_alert_days") pausedAlertDays.value = item.value;
+      else if (item.key === "pre_mediation_soon_days") preMediationSoonDays.value = item.value;
+      else if (item.key === "pre_mediation_urgent_days") preMediationUrgentDays.value = item.value;
     }
   } catch {
     // 读取失败用默认文案数值,不影响页面。
@@ -137,6 +149,10 @@ onMounted(async () => {
       >
         <div class="stat-icon">
           <el-icon :size="18"><component :is="card.icon" /></el-icon>
+        </div>
+        <div v-if="card.key === 'pre_mediation' && showPreMediationBadge" class="pre-mediation-badge">
+          <span v-if="preMediationSoon > 0" class="badge-soon">临近 {{ preMediationSoon }}</span>
+          <span v-if="preMediationUrgent > 0" class="badge-urgent">紧急 {{ preMediationUrgent }}</span>
         </div>
         <div class="stat-value">{{ summary?.[card.key] ?? "-" }}</div>
         <div class="stat-label">{{ card.label }}</div>
@@ -315,5 +331,32 @@ onMounted(async () => {
   color: var(--el-text-color-secondary);
   font-size: 13px;
   margin-top: 4px;
+}
+
+.pre-mediation-badge {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pre-mediation-badge span {
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-weight: 500;
+}
+
+.badge-soon {
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.14);
+}
+
+.badge-urgent {
+  color: #ea580c;
+  background: rgba(249, 115, 22, 0.14);
 }
 </style>

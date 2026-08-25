@@ -10,6 +10,9 @@ class DashboardSummary(BaseModel):
     hearings_upcoming: int = 0  # 近日开庭:今日 ~ 下周日的开庭场次
     pending_mediation: int = 0
     pending_receive: int = 0  # 待办案件:收件环节待审核、尚未立案的案件数
+    pre_mediation: int = 0  # 案前调解:收件环节 next_step=3(收件审核通过后进入调解)的案件数
+    pre_mediation_soon: int = 0  # 其中进入调解满 30 天(临近)的案件数
+    pre_mediation_urgent: int = 0  # 其中进入调解满 45 天(紧急)的案件数
     open_cases: int = 0  # 在办案件:已立案未结案(含中止/调解/裁决中)的案件数
     heard_awaiting_decision: int = 0
     paused_long: int = 0  # 中止过久:审理中止超过阈值的案件数

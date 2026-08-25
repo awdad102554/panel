@@ -32,11 +32,14 @@ from app.services.internal_case_urgency import (
     DECIDING_STEP,
     MEDIATION_STEP,
     UrgencyResult,
+    compute_pre_mediation_urgency,
     compute_urgency,
+    is_pre_mediation,
     sort_days_key,
     urgency_order,
 )
 from app.services.internal_hearing import fetch_hearings, upcoming_range
+from app.services.pre_mediation_binding import load_bound_receive_ids
 from app.services.time_limits import effective_settings
 from app.api.v1.virtual_cases import list_pending_virtual_cases
 from app.db.virtual import VirtualCase
@@ -213,6 +216,7 @@ _SNAPSHOT_CARD_KEYS = (
     "due_reminders",
     "pending_mediation",
     "pending_receive",
+    "pre_mediation",
     "open_cases",
     "heard_awaiting_decision",
     "paused_long",
@@ -260,10 +264,18 @@ def _virtual_case_out(row: VirtualCase, settings: Settings, today: date) -> Inte
 
 
 # 计数与明细共用的卡片口径,改动只动这里,卡片数字和点开后的列表永远对得上。
-def _row_in_card(key: str, row: InternalCaseTracking, urgency: str, today: date) -> bool:
+def _row_in_card(
+    key: str,
+    row: InternalCaseTracking,
+    urgency: str,
+    today: date,
+    bound_receive_ids: frozenset[str] = frozenset(),
+) -> bool:
     if key == "due_reminders":
         # 时效提醒:已超期(含审批退回返工) + 紧急 + 临近。
-        return urgency in ("overdue", "urgent", "soon")
+        # 案前调解(next_step=3)的"临近/紧急"是调解时长警告(30/45天),非硬截止日,
+        # 单列在"案前调解"卡片跟踪,不进时效提醒(否则会被算成"已超期",2026-08-24)。
+        return urgency in ("overdue", "urgent", "soon") and not is_pre_mediation(row)
     if key == "paused_long":
         # 中止过久:审理中止超过 case_urgency_paused_alert_days 的案件。
         return urgency == "paused_overdue"
@@ -282,6 +294,10 @@ def _row_in_card(key: str, row: InternalCaseTracking, urgency: str, today: date)
         )
     if key == "pending_mediation":
         return row.stage == InternalStage.HANDLE and row.current_step == MEDIATION_STEP
+    if key == "pre_mediation":
+        # 案前调解:收件环节 next_step=3(收件审核通过后进入调解,活跃状态)。
+        # 已绑定立案(进入下一阶段)的案前调解不再计入,见 pre_mediation_bindings。
+        return is_pre_mediation(row) and row.external_case_id not in bound_receive_ids
     if key == "heard_awaiting_decision":
         return row.stage == InternalStage.HANDLE and row.current_step == DECIDING_STEP
     if key == "today_filed":
@@ -306,11 +322,14 @@ async def _snapshot_stats(db: AsyncSession) -> dict[str, int] | None:
 
     口径(与办案进度监控页共用同一套 compute_urgency 紧急度逻辑,两页数字互相对得上):
     - due_reminders(时效提醒): 紧急度为 overdue / urgent / soon 的案件数,
-      即时效维度需要处理的事项(已超期、审批退回返工、紧急、临近)。
+      即时效维度需要处理的事项(已超期、审批退回返工、紧急、临近);案前调解
+      单列在"案前调解"卡片,不计入时效提醒。
     - pending_receive(待办案件): 收件环节或线上预约待审核(status=0)、尚未立案
       的案件 + 待录入内网的预登记案件(SQLite,见 db/virtual.py)。
     - open_cases(在办案件): handle 环节未结案/未归档的案件。
     - pending_mediation(待调解): handle 环节 current_step=组织调解。
+    - pre_mediation(案前调解): 收件环节 next_step=3(收件审核通过后进入调解);
+      另返回 pre_mediation_soon/pre_mediation_urgent 分档计数(满 30/45 天)。
     - heard_awaiting_decision(已开庭待裁决): handle 环节 current_step=仲裁裁决中。
     - paused_long(中止过久): 审理中止超过 case_urgency_paused_alert_days 的案件。
     - today_filed(今日立案): handle 环节原生 handle_at 为今日(本地日期)。
@@ -322,12 +341,23 @@ async def _snapshot_stats(db: AsyncSession) -> dict[str, int] | None:
     if rows is None:
         return None
 
+    # 已绑定立案的案前调解(进入下一阶段)不再计入案前调解卡片及其临近/紧急分档。
+    bound_receive_ids = frozenset(await load_bound_receive_ids(db))
+
     today = datetime.now(_LOCAL_TZ).date()
     stats = {key: 0 for key in _SNAPSHOT_CARD_KEYS}
+    stats["pre_mediation_soon"] = 0
+    stats["pre_mediation_urgent"] = 0
     for row, result in rows:
         for key in _SNAPSHOT_CARD_KEYS:
-            if _row_in_card(key, row, result.urgency, today):
+            if _row_in_card(key, row, result.urgency, today, bound_receive_ids):
                 stats[key] += 1
+        # 案前调解「临近/紧急」分档计数(满 30/45 天),供总览卡片右上角提醒。
+        if is_pre_mediation(row) and row.external_case_id not in bound_receive_ids:
+            if result.urgency == "soon":
+                stats["pre_mediation_soon"] += 1
+            elif result.urgency == "urgent":
+                stats["pre_mediation_urgent"] += 1
     # 待办案件并入待录入内网的预登记案件(本地 SQLite)。
     stats["pending_receive"] += len(await list_pending_virtual_cases())
     return stats
@@ -373,12 +403,18 @@ async def list_upcoming_hearings(
 @router.get("/card-cases", response_model=list[InternalCaseOut])
 async def list_card_cases(
     key: str,
+    include_pre_mediation: bool = False,
     db: AsyncSession = Depends(get_db),
     _current_user=Depends(get_current_user),
 ) -> list[InternalCaseOut]:
     """总览卡片点开后对应的案件明细,口径与卡片计数共用 _row_in_card。
 
     排序与办案进度监控页一致:紧急度权重升序,同档内剩余天数越少越靠前。
+
+    include_pre_mediation=True 且 key=due_reminders 时,额外并入案前调解的
+    「临近/紧急」(进入调解满 30/45 天)案件——供 InfoWeb 时效提醒弹窗统一
+    展示(自由列表、无表格列名冲突);面板总览「时效提醒」卡片不传此参数,
+    案前调解仍单列在「案前调解」卡片。
     """
     if key not in _SNAPSHOT_CARD_KEYS:
         return []
@@ -388,11 +424,28 @@ async def list_card_cases(
         return []
 
     today = datetime.now(_LOCAL_TZ).date()
-    matched = [
-        (result, row)
-        for row, result in rows
-        if _row_in_card(key, row, result.urgency, today)
-    ]
+    bound_receive_ids = frozenset(await load_bound_receive_ids(db))
+    if key == "pre_mediation":
+        # 案前调解按"进入调解满 30/45 天"单独分档(compute_urgency 对 next_step=3
+        # 同样走 compute_pre_mediation_urgency,这里直接复用,口径与卡片计数一致)。
+        matched = [
+            (compute_pre_mediation_urgency(row.raw_payload or {}, settings, today), row)
+            for row, result in rows
+            if is_pre_mediation(row) and row.external_case_id not in bound_receive_ids
+        ]
+    else:
+        matched = [
+            (result, row)
+            for row, result in rows
+            if _row_in_card(key, row, result.urgency, today, bound_receive_ids)
+            or (
+                include_pre_mediation
+                and key == "due_reminders"
+                and is_pre_mediation(row)
+                and result.urgency in ("soon", "urgent")
+                and row.external_case_id not in bound_receive_ids
+            )
+        ]
     items = await _build_case_list(db, matched)
     if key == "pending_receive":
         # 并入待录入内网的预登记案件(本地 SQLite),按同一套紧急度混排。
@@ -428,7 +481,7 @@ async def get_dashboard_charts(
     - open_steps: handle 环节未结案/未归档案件的 current_step 分布。
     - end_ways: 已结案案件的结案方式分布(调解/裁决/撤回/撤销)。
     - urgency: 在办案件紧急度分布(不含已结案 closed / 已退回 rejected,
-      否则 2000+ 已结案会让在办的几十件完全看不见)。
+      否则 2000+ 已结案会让在办的几十件完全看不见;案前调解也不计入)。
     快照为空时各字段返回空列表,前端显示"暂无数据"。
     """
     rows = await _snapshot_rows(db, await effective_settings(db))
@@ -444,6 +497,10 @@ async def get_dashboard_charts(
     urgency_counts: Counter[str] = Counter()
 
     for row, result in rows:
+        # 案前调解只在独立卡片跟踪,不进通用紧急度分布(其"紧急"是调解时长警告,
+        # 非审理时限),否则 30 件案前调解会淹没"紧急"桶(2026-08-24)。
+        if is_pre_mediation(row):
+            continue
         if result.urgency not in ("closed", "rejected"):
             urgency_counts[result.urgency] += 1
         if row.stage != InternalStage.HANDLE:
@@ -515,7 +572,7 @@ async def list_chart_cases(
     - filed_month/closed_month: value 为 YYYY-MM,分别按 handle_at / end_at 的月份过滤。
     - open_step: value 为 current_step(仅 handle 未结案/未归档)。
     - end_way: value 为结案方式(仅已结案/已归档)。
-    - urgency: value 为紧急度(与图表一样不含 closed/rejected,无需显式排除)。
+    - urgency: value 为紧急度(与图表一样不含 closed/rejected 与案前调解)。
     - arbitrator: value 为仲裁员姓名(handle 环节全部案件)。
     - duration_bucket: value 为审理时长分桶(≤45天/46-60天/61-90天/>90天,仅已结案/已归档)。
     - over_limit_open/over_limit_closed: 超审限案件(经过天数扣除中止 > 45天+延期),
@@ -531,7 +588,8 @@ async def list_chart_cases(
 
     def match(row: InternalCaseTracking, result: UrgencyResult) -> bool:
         if kind == "urgency":
-            return result.urgency == value
+            # 与 /dashboard/charts 聚合一致:案前调解不进通用紧急度分布。
+            return result.urgency == value and not is_pre_mediation(row)
         if row.stage != InternalStage.HANDLE:
             return False
         if kind == "filed_month":

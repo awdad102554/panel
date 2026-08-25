@@ -9,8 +9,11 @@
 - 未通过/退回状态(结案审核未通过/结案审批未通过/处理文书审批未通过)意味着要
   返工,按最高优先级红色 overdue 提醒。
 - 组织调解:进入调解环节超过 case_mediation_alert_days 天(约一个月)提醒(soon)。
-- reserve/receive.status 枚举:0 待审核(工作人员待办,按原生倒计时/天数监控)/
-  其余=已处理,单列 rejected 默认隐藏。收件/预约超期按红色 overdue 提醒。
+- reserve.status 枚举:0 待审核 / 1 审核通过 / 2 审核不通过 / 3 现场确认同意 / 4 现场确认不同意。
+- receive.status 枚举:0 收件登记 / 1 审核通过 / 2 审核不通过 / 3 审批通过 / 4 审批不通过 / 5 已提交。
+  两者都是 0=工作人员待办(按原生倒计时/天数监控),其余=已离开待办(审核/审批通过已流转、
+  不通过已退回),单列 rejected 默认隐藏(receive 的 next_step=3 案前调解除外,见下)。
+  收件/预约超期按红色 overdue 提醒。
 - current_step 枚举不封闭,未识别的子状态按普通 handle 在办处理,不报错。
 """
 
@@ -36,6 +39,12 @@ MEDIATION_STEP = "组织调解"
 DECIDING_STEP = "仲裁裁决中"  # 已开庭、等待裁决(案件总览"已开庭待裁决"的口径)
 # 未通过/退回状态:需要返工,红色 overdue 级提醒。
 REWORK_STEPS = frozenset({"结案审核未通过", "结案审批未通过", "处理文书审批未通过"})
+
+# 收件环节 next_step=3 = 案前调解(收件审核通过后进入调解),区别于 handle 阶段的
+# "组织调解"。案前调解是活跃状态(调解中),不是"已处理/退回",单独一张总览卡片
+# 跟踪其时效:进入调解满 soon 天标"临近"、满 urgent 天标"紧急/警告"(2026-08-24)。
+PRE_MEDIATION_NEXT_STEP = 3
+PRE_MEDIATION_STEP_LABEL = "案前调解"
 
 # 紧急度枚举(与前端 InternalCaseUrgency 对应)。
 UrgencyLevel = str  # "overdue"|"urgent"|"soon"|"normal"|"paused"|"paused_overdue"|"closed"|"rejected"
@@ -168,9 +177,14 @@ def compute_urgency(
             settings.case_urgency_soon_days, settings.case_urgency_urgent_days,
         )
 
-    # 4. 收件:status 与 reserve 同一套口径——0 待审核(工作人员待办)才监控,
-    # 3/4=审核/现场确认已完成、2=不同意退回,都是已处理,单列 rejected 默认隐藏,
-    # 不再按 receive_at 计算天数(否则早年审结的老收件会永远挂在列表里报"临近")。
+    # 4. 收件:receive.status 枚举 0 收件登记(待办)/1 审核通过/2 审核不通过/
+    # 3 审批通过/4 审批不通过/5 已提交——只有 0 是工作人员待办,其余都已离开待办
+    # (审核/审批通过已流转、不通过已退回),单列 rejected 默认隐藏,不再按 receive_at
+    # 计算天数(否则早年审结的老收件会永远挂在列表里报"临近")。
+    # 但案前调解(next_step=3)是例外:虽 status=3(审批通过),仍是活跃的调解状态,
+    # 不是"已离开/退回",不能单列 rejected——单独按进入调解 30/45 天分档(2026-08-24)。
+    if is_pre_mediation(row):
+        return compute_pre_mediation_urgency(row.raw_payload or {}, settings, today)
     receive_status = (row.raw_payload or {}).get("status")
     if receive_status is not None and receive_status != 0:
         return UrgencyResult("rejected", None, "status")
@@ -218,3 +232,71 @@ def _as_date(value: datetime) -> date:
             return value.astimezone(_LOCAL_TZ).date()
         return value.date()
     return value
+
+
+def _coerce_int(value) -> int | None:
+    """宽容转 int:JSONB 里可能是 int,内网也可能回字符串 "3",统一转 int 比较。"""
+    if value is None:
+        return None
+    try:
+        return int(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def is_pre_mediation(row: InternalCaseTracking) -> bool:
+    """收件环节 next_step=3 即案前调解(仍在调解中,活跃状态,不是已离开/已退回)。"""
+    if row.stage != InternalStage.RECEIVE:
+        return False
+    return _coerce_int((row.raw_payload or {}).get("next_step")) == PRE_MEDIATION_NEXT_STEP
+
+
+def _pre_mediation_entry_datetime(payload: dict) -> datetime | None:
+    """进入案前调解的时间锚点(带时分秒):review_at(收件审核通过、转入调解),
+    缺省回落 receive_at/created_at。
+
+    内网时间戳是无时区的本地时间(CST),strptime 后即本地时间,无需再换算时区。
+    """
+    for key in ("review_at", "receive_at", "created_at"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return datetime.strptime(value, fmt)
+                except ValueError:
+                    continue
+    return None
+
+
+def pre_mediation_entered_at(payload: dict) -> datetime | None:
+    """案前调解的进入时间(公开:明细列表"进入状态时间"列用,仅对案前调解案件有意义)。"""
+    return _pre_mediation_entry_datetime(payload)
+
+
+def _pre_mediation_entry_date(payload: dict) -> date | None:
+    """进入案前调解的日期(用于 30/45 天分档)。"""
+    dt = _pre_mediation_entry_datetime(payload)
+    return dt.date() if dt is not None else None
+
+
+def compute_pre_mediation_urgency(
+    payload: dict,
+    settings: Settings,
+    today: date,
+) -> UrgencyResult:
+    """案前调解案件紧急度:进入调解满 soon 天标"临近"、满 urgent 天标"紧急/警告"
+    (用户口径 30/45 天)。
+
+    days_remaining = urgent 阈值 − 已过天数;负值表示已过"警告"点,前端显示"已超期 X 天"。
+    与 virtual_case 的两阈值分档同构(临近阈值在前、紧急阈值在后)。
+    """
+    entry = _pre_mediation_entry_date(payload)
+    if entry is None:
+        return UrgencyResult("normal", None, "status")
+    elapsed = (today - entry).days
+    remaining = settings.pre_mediation_urgent_days - elapsed
+    if elapsed >= settings.pre_mediation_urgent_days:
+        return UrgencyResult("urgent", remaining, "elapsed")
+    if elapsed >= settings.pre_mediation_soon_days:
+        return UrgencyResult("soon", remaining, "elapsed")
+    return UrgencyResult("normal", remaining, "elapsed")

@@ -40,7 +40,13 @@ from app.models.internal_case import (
     InternalStage,
     SyncVerificationReport,
 )
-from app.services.internal_case_urgency import ARCHIVED_STEP, CLOSED_STEP
+from app.services.internal_case_urgency import (
+    ARCHIVED_STEP,
+    CLOSED_STEP,
+    PRE_MEDIATION_NEXT_STEP,
+    PRE_MEDIATION_STEP_LABEL,
+)
+from app.services.pre_mediation_binding import auto_bind_pre_mediation
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +318,10 @@ def _map_record(stage: InternalStage, raw: dict) -> dict:
     elif stage is InternalStage.RECEIVE:
         # 收件自带 receive_time_limit(中文文案),解析成统一的剩余天数(负数=超期)。
         native_remaining_days = _parse_time_limit_days(raw.get("receive_time_limit"))
+        # 案前调解(receive.next_step=3)给 current_step 打标:它虽在收件环节,但已是
+        # 活跃的调解子状态,总览"案前调解"卡片与明细展示都靠这个子状态标识。
+        if _parse_int(raw.get("next_step")) == PRE_MEDIATION_NEXT_STEP:
+            current_step = PRE_MEDIATION_STEP_LABEL
 
     return {
         "external_case_id": external_case_id,
@@ -402,6 +412,23 @@ async def _sync_internal_cases(
             counts["deleted"] = len(deleted_ids)
             logger.info("全量同步清理内网已删除案件的快照: %d 件", len(deleted_ids))
     if not full:
+        # 案前调解补抓(2026-08-24):收件审批通过(status=3)进入案前调解的案件,
+        # 不在 receive?status=0 的待审核筛选里,但仍是活跃的调解状态,需单独拉取
+        # 以持续跟踪其 30/45 天调解时效。与 handle 的关系靠 _STAGE_PRIORITY 保证:
+        # 案前调解一旦立案(转 handle),由 handle 环节覆盖,不会冻结在收件环节。
+        try:
+            pre_mediation = await _fetch_stage_records(
+                client, _STAGE_PATHS[InternalStage.RECEIVE], {"next_step": "3"}
+            )
+        except CaseSystemError as exc:
+            logger.warning("内网 receive 案前调解补抓失败,跳过: %s", exc)
+        else:
+            counts["pre_mediation"] = len(pre_mediation)
+            for raw in pre_mediation:
+                if raw.get("case_id") is None:
+                    continue
+                _merge_by_priority(merged, _map_record(InternalStage.RECEIVE, raw))
+
         # 按日期补抓(2026-08-06 实测内网支持 application_date 过滤):今天+昨天的
         # 新收件/新立案各拉一次(每次通常个位数条)。捕获"快速流转"案件——提交后
         # 很快被处理、从未出现在 status=0 筛选结果里的收件(如实测 263 号案件),
@@ -443,6 +470,19 @@ async def _sync_internal_cases(
         )
         if deleted_ids:
             counts["deleted"] = len(deleted_ids)
+
+    # 案前调解 → 立案 一对一绑定(含记事转移)。合并结果里匹配,历史已结案的靠 search 兜底。
+    # 单独 try 隔离:绑定失败只记 warning,不影响快照 upsert 主流程。
+    try:
+        bound_count = await auto_bind_pre_mediation(db, client, merged)
+    except CaseSystemError as exc:
+        logger.warning("案前调解自动绑定失败,跳过本轮: %s", exc)
+        bound_count = 0
+    except Exception:
+        logger.exception("案前调解自动绑定异常,跳过本轮")
+        bound_count = 0
+    if bound_count:
+        counts["pre_mediation_bound"] = bound_count
 
     now = _utc_now()
     rows: list[dict] = []
@@ -557,7 +597,10 @@ async def _refetch_disappeared(
             if prev.current_step in (CLOSED_STEP, ARCHIVED_STEP):
                 continue
         elif prev.stage == InternalStage.RECEIVE:
-            if (prev.raw_payload or {}).get("status") != 0:
+            payload = prev.raw_payload or {}
+            # 案前调解(status=3, next_step=3)仍是活跃状态,需持续跟踪其后续流转
+            # (立案/调解结束/内网删除);其余已处理(status!=0)的收件信息不再变动,跳过。
+            if payload.get("status") != 0 and _parse_int(payload.get("next_step")) != PRE_MEDIATION_NEXT_STEP:
                 continue
         else:
             # reserve:全量拉取成功时,消失=已离开预约环节或内网已删除,删除快照。

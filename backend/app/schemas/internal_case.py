@@ -27,6 +27,9 @@ class InternalCaseOut(BaseModel):
     end_at: datetime | None = None
     end_way: str | None = None
     phase_entered_at: datetime
+    # 进入当前子状态的时间(仅案前调解=审核通过 review_at;其余环节为 None)。
+    # 明细列表用它展示"进入状态时间",替代无意义的"剩余天数/已超期"口径(2026-08-24)。
+    state_entered_at: datetime | None = None
     last_synced_at: datetime
 
     # 计算字段

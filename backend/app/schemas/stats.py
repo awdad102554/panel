@@ -11,6 +11,7 @@ class StatsKpis(BaseModel):
     open_cases: int = 0  # 在办案件(handle 未结案/未归档)
     closed_cases: int = 0  # 已结案(含已归档)
     mediation_rate: float = 0  # 调解率 = 调解结案 / 有结案方式的已结案件
+    mediation_withdrawal_rate: float = 0  # 调撤率 = (调解+撤回) / 有结案方式的已结案件
     avg_duration_days: float = 0  # 平均审理天数(结案日 - 立案日 - 中止天数)
     overdue_cases: int = 0  # 当前超期案件数(紧急度 overdue)
     over_limit_open: int = 0  # 在办超审限(经过天数扣中止 > 45天+延期)
@@ -33,6 +34,8 @@ class YearStats(BaseModel):
     filed: int = 0  # 立案数(handle_at 落在该年)
     closed: int = 0  # 结案数(end_at 落在该年)
     mediation_rate: float = 0  # 该年调解率(调解结案/有结案方式的结案)
+    mediation_withdrawal_rate: float = 0  # 调撤率 = (调解+撤回)/有结案方式的结案
+    final_ruling_rate: float = 0  # 一裁终局率 = (部分终局+一裁终局)/裁决结案数
     avg_duration_days: float = 0  # 该年结案案件的平均审理天数(扣中止)
 
 
@@ -54,10 +57,13 @@ class YearlyStatsOut(BaseModel):
     filed: int = 0  # 该年立案数
     closed: int = 0  # 该年结案数
     mediation_rate: float = 0  # 该年调解率
+    mediation_withdrawal_rate: float = 0  # 调撤率 = (调解+撤回)/有结案方式的结案
+    final_ruling_rate: float = 0  # 一裁终局率 = (部分终局+一裁终局)/裁决结案数
     avg_duration_days: float = 0  # 该年结案平均审理天数(扣中止)
     monthly_filed: list[int] = []
     monthly_closed: list[int] = []
     available_years: list[int] = []  # 快照中出现过立案/结案的年份(供年份选择器)
+    stat_year: YearStats | None = None  # 统计年度(12-10~次年12-10)汇总,标签同 year
 
 
 class StatsOverview(BaseModel):

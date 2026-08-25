@@ -13,7 +13,12 @@ from app.models.internal_case import (
     InternalCaseTracking,
     InternalStage,
 )
-from app.services.internal_case_urgency import compute_urgency
+from app.services.internal_case_urgency import (
+    compute_pre_mediation_urgency,
+    compute_urgency,
+    is_pre_mediation,
+    pre_mediation_entered_at,
+)
 
 TODAY = date.today()
 SETTINGS = Settings(
@@ -215,3 +220,106 @@ def test_handle_fallback_without_native_limit():
 
     row = make_row(InternalStage.HANDLE, native_remaining_days=None, days_since_phase=10)
     assert compute_urgency(row, None, SETTINGS).urgency == "overdue"
+
+
+# ---- 案前调解(receive.next_step=3) ----
+
+PM_SETTINGS = Settings(pre_mediation_soon_days=30, pre_mediation_urgent_days=45)
+
+
+def _pm_payload(review_at: str | None = None) -> dict:
+    p: dict = {"status": 3, "next_step": 3}
+    if review_at:
+        p["review_at"] = review_at
+    return p
+
+
+def test_is_pre_mediation():
+    """案前调解 = 收件环节 next_step=3;整数/字符串都认,其它环节或其它 next_step 不算。"""
+    assert is_pre_mediation(make_row(InternalStage.RECEIVE, raw_payload={"next_step": 3})) is True
+    assert is_pre_mediation(make_row(InternalStage.RECEIVE, raw_payload={"next_step": "3"})) is True
+    assert is_pre_mediation(make_row(InternalStage.RECEIVE, raw_payload={"next_step": 4})) is False
+    assert is_pre_mediation(make_row(InternalStage.RECEIVE, raw_payload={})) is False
+    assert is_pre_mediation(make_row(InternalStage.HANDLE, raw_payload={"next_step": 3})) is False
+
+
+def test_pre_mediation_urgency_tiers():
+    """进入调解满 30 天标临近、满 45 天标紧急(用户口径);days_remaining = 45 − 已过天数。"""
+    today = date(2026, 8, 24)
+    r = compute_pre_mediation_urgency(_pm_payload("2026-08-14 10:00:00"), PM_SETTINGS, today)
+    assert r.urgency == "normal"
+    assert r.days_remaining == 35  # 进入 10 天
+
+    r = compute_pre_mediation_urgency(_pm_payload("2026-07-25 10:00:00"), PM_SETTINGS, today)
+    assert r.urgency == "soon"
+    assert r.days_remaining == 15  # 进入 30 天
+
+    r = compute_pre_mediation_urgency(_pm_payload("2026-07-10 10:00:00"), PM_SETTINGS, today)
+    assert r.urgency == "urgent"
+    assert r.days_remaining == 0  # 进入 45 天
+
+    r = compute_pre_mediation_urgency(_pm_payload("2026-07-05 10:00:00"), PM_SETTINGS, today)
+    assert r.urgency == "urgent"
+    assert r.days_remaining == -5  # 进入 50 天,已过"警告"点
+
+
+def test_pre_mediation_urgency_fallback_without_review_at():
+    """review_at 缺失回落到 receive_at;完全无日期回退 normal 且无倒计时口径。"""
+    today = date(2026, 8, 24)
+    p = {"status": 3, "next_step": 3, "receive_at": "2026-08-20 10:00:00"}
+    r = compute_pre_mediation_urgency(p, PM_SETTINGS, today)
+    assert r.urgency == "normal"
+    assert r.days_remaining == 41  # 45 − (8/24 − 8/20)
+
+    r = compute_pre_mediation_urgency({"status": 3, "next_step": 3}, PM_SETTINGS, today)
+    assert r.urgency == "normal"
+    assert r.days_remaining is None
+
+
+def test_compute_urgency_receive_pre_mediation_is_not_rejected():
+    """案前调解(receive.status=3 + next_step=3)不是"已处理/退回",不能判 rejected
+    (此前通用口径 status!=0 直接 rejected,把案前调解误判成已退回默认隐藏,2026-08-24 修正)。"""
+    today = date(2026, 8, 24)
+
+    # 进入调解 10 天:正常(而非 rejected)。
+    row = make_row(
+        InternalStage.RECEIVE,
+        raw_payload={"status": 3, "next_step": 3, "review_at": "2026-08-14 10:00:00"},
+    )
+    r = compute_urgency(row, None, PM_SETTINGS, today=today)
+    assert r.urgency == "normal"
+    assert r.days_remaining == 35
+
+    # 进入调解 30 天:临近;45 天:紧急——都会进"时效提醒"而非被隐藏。
+    row = make_row(
+        InternalStage.RECEIVE,
+        raw_payload={"status": 3, "next_step": 3, "review_at": "2026-07-25 10:00:00"},
+    )
+    assert compute_urgency(row, None, PM_SETTINGS, today=today).urgency == "soon"
+
+    row = make_row(
+        InternalStage.RECEIVE,
+        raw_payload={"status": 3, "next_step": 3, "review_at": "2026-07-10 10:00:00"},
+    )
+    assert compute_urgency(row, None, PM_SETTINGS, today=today).urgency == "urgent"
+
+
+def test_compute_urgency_receive_status3_not_pre_mediation_still_rejected():
+    """收件 status!=0 但 next_step!=3(如审核通过转立案 next_step=4)仍是"已处理",
+    继续判 rejected——只有 next_step=3 的案前调解例外。"""
+    row = make_row(
+        InternalStage.RECEIVE,
+        days_since_phase=100,
+        raw_payload={"status": 3, "next_step": 4},
+    )
+    r = compute_urgency(row, None, PM_SETTINGS)
+    assert r.urgency == "rejected"
+    assert r.source == "status"
+
+
+def test_pre_mediation_entered_at():
+    """进入案前调解的时间锚点:优先 review_at,缺省回落 receive_at/created_at;全缺返回 None。"""
+    assert pre_mediation_entered_at({"review_at": "2026-03-17 09:54:47"}) == datetime(2026, 3, 17, 9, 54, 47)
+    assert pre_mediation_entered_at({"receive_at": "2026-03-16 09:24:49"}) == datetime(2026, 3, 16, 9, 24, 49)
+    assert pre_mediation_entered_at({"created_at": "2026-03-16"}) == datetime(2026, 3, 16, 0, 0, 0)
+    assert pre_mediation_entered_at({}) is None

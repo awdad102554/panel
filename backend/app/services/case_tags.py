@@ -1,10 +1,10 @@
-"""案件标签服务:subject_key 构造、案件解析(环节)、IP→用户名绑定。
+"""案件记事本服务:subject_key 构造、案件解析(环节)、IP→用户名绑定。
 
-subject_key 是标签归属线程的统一键:
+subject_key 是记事归属线程的统一键:
 - ext:{external_case_id} —— 内网案件(收件/立案/预约),同一 case_id 跨收件→立案自动衔接;
 - virt:{预登记id}        —— 本地预登记案件(独立 SQLite,未落内网)。
 
-标签内容存在 MySQL(与 InfoWeb 共用);案件环节解析仍读 panel 的 PG 快照(ext)或 SQLite(virt)。
+记事内容存在 MySQL(与 InfoWeb 共用);案件环节解析仍读 panel 的 PG 快照(ext)或 SQLite(virt)。
 """
 
 from __future__ import annotations
@@ -20,19 +20,19 @@ SUBJECT_VIRT_PREFIX = "virt:"
 
 
 def subject_key_for_external(external_case_id: str) -> str:
-    """内网案件(收件/立案/预约)的标签线程键。"""
+    """内网案件(收件/立案/预约)的记事线程键。"""
     return f"{SUBJECT_EXT_PREFIX}{external_case_id}"
 
 
 def subject_key_for_virtual(virtual_case_id: str) -> str:
-    """本地预登记案件的标签线程键。"""
+    """本地预登记案件的记事线程键。"""
     return f"{SUBJECT_VIRT_PREFIX}{virtual_case_id}"
 
 
 async def resolve_subject_stage(db: AsyncSession, subject_key: str) -> str:
     """解析 subject_key,校验对应案件存在,返回该案件当前环节(stage 字符串)。
 
-    环节用于给新标签打「所在环节」标记:
+    环节用于给新记事打「所在环节」标记:
     - ext:{case_id} → 内网快照当前 stage(reserve/receive/handle);
     - virt:{id}    → 固定 "virtual"(预登记,不在主库快照)。
     案件不存在抛 LookupError(调用方转 404);subject_key 非法抛 ValueError(转 400)。

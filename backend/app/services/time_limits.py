@@ -45,6 +45,12 @@ TIME_LIMIT_SPECS: dict[str, TimeLimitSpec] = {
     "case_mediation_alert_days": TimeLimitSpec(
         "调解超时提醒", 30, "组织调解超过此天数提醒关注", 1, 180
     ),
+    "pre_mediation_soon_days": TimeLimitSpec(
+        "案前调解临近阈值", 30, "案前调解进入调解满此天数标为\"临近\",总览卡片右上角提醒", 1, 365
+    ),
+    "pre_mediation_urgent_days": TimeLimitSpec(
+        "案前调解紧急阈值", 45, "案前调解进入调解满此天数升级为\"紧急\"(需大于临近阈值)", 2, 365
+    ),
     "case_sync_interval_minutes": TimeLimitSpec(
         "内网同步间隔", 60, "后台轻量同步的间隔(分钟),下轮同步时生效", 5, 1440
     ),
@@ -113,6 +119,8 @@ async def save_time_limits(db: AsyncSession, updates: dict[str, int]) -> None:
         raise ValueError("时效紧急阈值需小于临近阈值")
     if merged["virtual_case_urgent_days"] <= merged["virtual_case_soon_days"]:
         raise ValueError("预登记紧急阈值需大于临近阈值")
+    if merged["pre_mediation_urgent_days"] <= merged["pre_mediation_soon_days"]:
+        raise ValueError("案前调解紧急阈值需大于临近阈值")
     for key, value in cleaned.items():
         if key in existing:
             existing[key].value = str(value)
