@@ -88,6 +88,44 @@ function formatRate(rate: number) {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
+// 年度数据区可点击钻取的 5 类指标(平均审理时长不可点)。
+type YearKind = "filed" | "closed" | "mediated" | "withdrawal" | "final";
+
+const YEAR_KIND_LABELS: Record<YearKind, string> = {
+  filed: "立案",
+  closed: "结案",
+  mediated: "调解",
+  withdrawal: "调撤",
+  final: "一裁终局",
+};
+
+const YEAR_KIND_MAP: Record<"natural" | "stat", Record<YearKind, string>> = {
+  natural: {
+    filed: "filed_year",
+    closed: "closed_year",
+    mediated: "mediated_year",
+    withdrawal: "withdrawal_year",
+    final: "final_year",
+  },
+  stat: {
+    filed: "filed_stat_year",
+    closed: "closed_stat_year",
+    mediated: "mediated_stat_year",
+    withdrawal: "withdrawal_stat_year",
+    final: "final_stat_year",
+  },
+};
+
+function clickYearCard(kind: YearKind, scope: "natural" | "stat") {
+  const label = YEAR_KIND_LABELS[kind];
+  const stat = scope === "stat";
+  emit("show-cases", {
+    title: `${selectedYear.value}${stat ? "统计年度" : "年"}${label}案件`,
+    kind: YEAR_KIND_MAP[scope][kind],
+    value: String(selectedYear.value),
+  });
+}
+
 // 统计年度(12-10~次年12-10)标签:2026年度 = 2025-12-10 ~ 2026-12-10。
 const statRangeLabel = computed(() => `${selectedYear.value - 1}-12-10 ~ ${selectedYear.value}-12-10`);
 
@@ -120,32 +158,44 @@ onBeforeUnmount(() => {
         <div v-if="yearly.stat_year" class="year-row">
           <div class="year-row-label">统计年度（{{ statRangeLabel }}）</div>
           <div class="year-kpis">
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-blue">{{ yearly.stat_year.filed }}</span>
+            <div class="year-kpi clickable no-rate" title="点击查看该统计年度立案案件" @click="clickYearCard('filed', 'stat')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-value accent-text-blue">{{ yearly.stat_year.filed }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">立案</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.closed }}<span class="year-kpi-unit">件</span></span>
-              <span class="year-kpi-rate">结案率 {{ formatRate(yearly.stat_year.closing_rate) }}</span>
+            <div class="year-kpi clickable" title="点击查看该统计年度结案案件" @click="clickYearCard('closed', 'stat')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-rate">结案率 {{ formatRate(yearly.stat_year.closing_rate) }}</span>
+                <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.closed }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">结案</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.mediated }}<span class="year-kpi-unit">件</span></span>
-              <span class="year-kpi-rate">调解率 {{ formatRate(yearly.stat_year.mediation_rate) }}</span>
+            <div class="year-kpi clickable" title="点击查看该统计年度调解案件" @click="clickYearCard('mediated', 'stat')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-rate">调解率 {{ formatRate(yearly.stat_year.mediation_rate) }}</span>
+                <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.mediated }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">调解</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.mediated + yearly.stat_year.withdrawn }}<span class="year-kpi-unit">件</span></span>
-              <span class="year-kpi-rate">调撤率 {{ formatRate(yearly.stat_year.mediation_withdrawal_rate) }}</span>
+            <div class="year-kpi clickable" title="点击查看该统计年度调撤案件" @click="clickYearCard('withdrawal', 'stat')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-rate">调撤率 {{ formatRate(yearly.stat_year.mediation_withdrawal_rate) }}</span>
+                <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.mediated + yearly.stat_year.withdrawn }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">调撤</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-amber">{{ yearly.stat_year.final }}<span class="year-kpi-unit">件</span></span>
-              <span class="year-kpi-rate">一裁终局率 {{ formatRate(yearly.stat_year.final_ruling_rate) }}</span>
+            <div class="year-kpi clickable" title="点击查看该统计年度一裁终局案件" @click="clickYearCard('final', 'stat')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-rate">一裁终局率 {{ formatRate(yearly.stat_year.final_ruling_rate) }}</span>
+                <span class="year-kpi-value accent-text-amber">{{ yearly.stat_year.final }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">一裁终局</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-amber">{{ yearly.stat_year.avg_duration_days }} 天</span>
+            <div class="year-kpi no-rate">
+              <div class="year-kpi-main">
+                <span class="year-kpi-value accent-text-amber">{{ yearly.stat_year.avg_duration_days }}<span class="year-kpi-unit">天</span></span>
+              </div>
               <span class="year-kpi-label">平均审理时长</span>
             </div>
           </div>
@@ -153,40 +203,44 @@ onBeforeUnmount(() => {
         <div class="year-row">
           <div class="year-row-label">自然年度</div>
           <div class="year-kpis">
-            <div
-              class="year-kpi clickable"
-              title="点击查看该年立案案件"
-              @click="emit('show-cases', { title: `${selectedYear}年立案案件`, kind: 'filed_year', value: String(selectedYear) })"
-            >
-              <span class="year-kpi-value accent-text-blue">{{ yearly.filed }}</span>
+            <div class="year-kpi clickable no-rate" title="点击查看该年立案案件" @click="clickYearCard('filed', 'natural')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-value accent-text-blue">{{ yearly.filed }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">立案</span>
             </div>
-            <div
-              class="year-kpi clickable"
-              title="点击查看该年结案案件"
-              @click="emit('show-cases', { title: `${selectedYear}年结案案件`, kind: 'closed_year', value: String(selectedYear) })"
-            >
-              <span class="year-kpi-value accent-text-green">{{ yearly.closed }}<span class="year-kpi-unit">件</span></span>
-              <span class="year-kpi-rate">结案率 {{ formatRate(yearly.closing_rate) }}</span>
+            <div class="year-kpi clickable" title="点击查看该年结案案件" @click="clickYearCard('closed', 'natural')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-rate">结案率 {{ formatRate(yearly.closing_rate) }}</span>
+                <span class="year-kpi-value accent-text-green">{{ yearly.closed }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">结案</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ yearly.mediated }}<span class="year-kpi-unit">件</span></span>
-              <span class="year-kpi-rate">调解率 {{ formatRate(yearly.mediation_rate) }}</span>
+            <div class="year-kpi clickable" title="点击查看该年调解案件" @click="clickYearCard('mediated', 'natural')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-rate">调解率 {{ formatRate(yearly.mediation_rate) }}</span>
+                <span class="year-kpi-value accent-text-green">{{ yearly.mediated }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">调解</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ yearly.mediated + yearly.withdrawn }}<span class="year-kpi-unit">件</span></span>
-              <span class="year-kpi-rate">调撤率 {{ formatRate(yearly.mediation_withdrawal_rate) }}</span>
+            <div class="year-kpi clickable" title="点击查看该年调撤案件" @click="clickYearCard('withdrawal', 'natural')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-rate">调撤率 {{ formatRate(yearly.mediation_withdrawal_rate) }}</span>
+                <span class="year-kpi-value accent-text-green">{{ yearly.mediated + yearly.withdrawn }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">调撤</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-amber">{{ yearly.final }}<span class="year-kpi-unit">件</span></span>
-              <span class="year-kpi-rate">一裁终局率 {{ formatRate(yearly.final_ruling_rate) }}</span>
+            <div class="year-kpi clickable" title="点击查看该年一裁终局案件" @click="clickYearCard('final', 'natural')">
+              <div class="year-kpi-main">
+                <span class="year-kpi-rate">一裁终局率 {{ formatRate(yearly.final_ruling_rate) }}</span>
+                <span class="year-kpi-value accent-text-amber">{{ yearly.final }}<span class="year-kpi-unit">件</span></span>
+              </div>
               <span class="year-kpi-label">一裁终局</span>
             </div>
-            <div class="year-kpi">
-              <span class="year-kpi-value accent-text-amber">{{ yearly.avg_duration_days }} 天</span>
+            <div class="year-kpi no-rate">
+              <div class="year-kpi-main">
+                <span class="year-kpi-value accent-text-amber">{{ yearly.avg_duration_days }}<span class="year-kpi-unit">天</span></span>
+              </div>
               <span class="year-kpi-label">平均审理时长</span>
             </div>
           </div>
@@ -233,11 +287,14 @@ onBeforeUnmount(() => {
 }
 
 .year-kpi {
+  position: relative;
   display: flex;
   flex-direction: column;
-  padding: 10px 16px;
+  min-height: 76px;
+  padding: 12px 16px 20px;
   border-radius: 8px;
   background: #f8fafc;
+  overflow: hidden;
 }
 
 .year-kpi.clickable {
@@ -250,28 +307,43 @@ onBeforeUnmount(() => {
   transform: translateY(-1px);
 }
 
-.year-kpi-value {
-  font-size: 26px;
-  font-weight: 700;
+.year-kpi-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  justify-content: center;
+}
+
+.year-kpi-rate {
+  font-size: 16px;
+  color: var(--el-text-color-secondary);
   line-height: 1.2;
 }
 
+.year-kpi-value {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.15;
+}
+
+.year-kpi.no-rate .year-kpi-value {
+  font-size: 32px;
+}
+
 .year-kpi-label {
-  font-size: 12px;
+  position: absolute;
+  right: 10px;
+  bottom: 7px;
+  font-size: 16px;
   color: var(--el-text-color-secondary);
-  margin-top: 2px;
+  line-height: 1;
 }
 
 .year-kpi-unit {
   font-size: 13px;
   font-weight: 400;
   margin-left: 2px;
-}
-
-.year-kpi-rate {
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-  margin-top: 2px;
 }
 
 .chart-body {

@@ -8,7 +8,7 @@
 
 import logging
 from collections import Counter
-from datetime import date, datetime
+from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,10 +19,12 @@ from app.api.v1.dashboard import (
     _case_duration_days,
     _duration_bucket,
     _filed_date,
+    _is_final_ruling,
     _is_over_statutory_limit,
     _last_12_months,
     _LOCAL_TZ,
     _snapshot_rows,
+    _stat_year,
     _DURATION_BUCKETS,
 )
 from app.core.config import get_settings
@@ -56,22 +58,6 @@ async def _live_totals() -> tuple[int, int] | None:
     except CaseSystemError as exc:
         logger.warning("内网累计总数不可用,统计页退化用快照数: %s", exc)
         return None
-
-
-# 一裁终局口径:end_way_detail 里"部分终局/一裁终局"都算终局(工作人员 2026-08-25 确认)。
-_FINAL_RULING_DETAILS = {"部分终局", "一裁终局"}
-# 统计年度边界:12月10日~次年12月10日为一个统计年度,标签用结束年。
-_STAT_MONTH = 12
-_STAT_DAY = 10
-
-
-def _stat_year(d: date) -> int:
-    """统计年度标签(结束年):2026年度 = 2025-12-10 ~ 2026-12-10。"""
-    return d.year + 1 if (d.month, d.day) >= (_STAT_MONTH, _STAT_DAY) else d.year
-
-
-def _is_final_ruling(detail) -> bool:
-    return isinstance(detail, str) and detail in _FINAL_RULING_DETAILS
 
 
 def _aggregate(rows, year_fn, with_monthly: bool) -> dict[int, dict]:

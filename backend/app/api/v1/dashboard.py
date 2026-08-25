@@ -180,6 +180,22 @@ def _duration_bucket(days: int) -> str:
     return ">90天"
 
 
+# 一裁终局口径:end_way_detail 里"部分终局/一裁终局"都算终局(工作人员 2026-08-25 确认)。
+_FINAL_RULING_DETAILS = {"部分终局", "一裁终局"}
+# 统计年度边界:12月10日~次年12月10日为一个统计年度,标签用结束年。
+_STAT_MONTH = 12
+_STAT_DAY = 10
+
+
+def _stat_year(d: date) -> int:
+    """统计年度标签(结束年):2026年度 = 2025-12-10 ~ 2026-12-10。"""
+    return d.year + 1 if (d.month, d.day) >= (_STAT_MONTH, _STAT_DAY) else d.year
+
+
+def _is_final_ruling(detail) -> bool:
+    return isinstance(detail, str) and detail in _FINAL_RULING_DETAILS
+
+
 async def _snapshot_rows(
     db: AsyncSession,
     settings: Settings | None = None,
@@ -557,7 +573,53 @@ _CHART_KINDS = (
     "filed_month", "closed_month", "open_step", "end_way", "urgency",
     "arbitrator", "duration_bucket", "over_limit_open", "over_limit_closed",
     "filed_year", "closed_year",
+    "filed_stat_year", "closed_stat_year",
+    "mediated_year", "mediated_stat_year",
+    "withdrawal_year", "withdrawal_stat_year",
+    "final_year", "final_stat_year",
 )
+
+# 年度数据区钻取的维度子集(立案/结案/调解/调撤/一裁终局 × 自然/统计年度)。
+_YEAR_SCOPED_KINDS = (
+    "filed_stat_year", "closed_stat_year",
+    "mediated_year", "mediated_stat_year",
+    "withdrawal_year", "withdrawal_stat_year",
+    "final_year", "final_stat_year",
+)
+
+
+def _match_year_scoped(row: InternalCaseTracking, kind: str, value: str) -> bool:
+    """年度数据区点开明细的过滤口径。
+
+    kind 结尾带 _stat_year 时按统计年度(12-10~次年12-10,标签用结束年)过滤,
+    否则按自然年度。立案看立案日期(handle_at),其余(结案/调解/调撤/一裁终局)
+    看结案日期(end_at)且须已结案/归档;一裁终局 = end_way=裁决 且 end_way_detail
+    ∈ {部分终局, 一裁终局},调撤 = 调解 + 撤回。
+    """
+    stat = kind.endswith("_stat_year")
+
+    def year_of(d: date) -> int:
+        return _stat_year(d) if stat else d.year
+
+    if kind.startswith("filed_"):
+        filed = _filed_date(row)
+        return filed is not None and str(year_of(filed)) == value
+    if row.current_step not in (CLOSED_STEP, ARCHIVED_STEP) or row.end_at is None:
+        return False
+    if str(year_of(_as_local_date(row.end_at))) != value:
+        return False
+    if kind.startswith("closed_"):
+        return True
+    if kind.startswith("mediated_"):
+        return row.end_way == "调解"
+    if kind.startswith("withdrawal_"):
+        return row.end_way in ("调解", "撤回")
+    if kind.startswith("final_"):
+        return (
+            row.end_way == "裁决"
+            and _is_final_ruling((row.raw_payload or {}).get("end_way_detail"))
+        )
+    return False
 
 
 @router.get("/chart-cases", response_model=list[InternalCaseOut])
@@ -577,6 +639,9 @@ async def list_chart_cases(
     - duration_bucket: value 为审理时长分桶(≤45天/46-60天/61-90天/>90天,仅已结案/已归档)。
     - over_limit_open/over_limit_closed: 超审限案件(经过天数扣除中止 > 45天+延期),
       value 传任意值(不参与过滤)。
+    - filed_stat_year/closed_stat_year/mediated_year/mediated_stat_year/withdrawal_year/
+      withdrawal_stat_year/final_year/final_stat_year: 年度数据区钻取,按立案/结案日期
+      所在自然年度或统计年度过滤(口径见 _match_year_scoped)。
     """
     if kind not in _CHART_KINDS:
         return []
@@ -604,6 +669,8 @@ async def list_chart_cases(
                 and row.end_at is not None
                 and str(_as_local_date(row.end_at).year) == value
             )
+        if kind in _YEAR_SCOPED_KINDS:
+            return _match_year_scoped(row, kind, value)
         if kind == "closed_month":
             return (
                 row.current_step in (CLOSED_STEP, ARCHIVED_STEP)
