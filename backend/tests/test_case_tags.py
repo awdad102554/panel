@@ -77,6 +77,7 @@ def test_resolve_subject_stage_external_not_found():
 def test_resolve_subject_stage_external_returns_stage_string():
     class Row:
         stage = "receive"  # stage 列是 String,读回为 str
+        raw_payload = {}  # 无 next_step,不是案前调解
 
     assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:123")) == "receive"
 
@@ -87,8 +88,25 @@ def test_resolve_subject_stage_external_returns_stage_enum_value():
 
     class Row:
         stage = EnumLike()
+        raw_payload = {}
 
     assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:456")) == "handle"
+
+
+def test_resolve_subject_stage_external_pre_mediation_next_step_int():
+    class Row:
+        stage = "receive"
+        raw_payload = {"next_step": 3}
+
+    assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:789")) == "pre_mediation"
+
+
+def test_resolve_subject_stage_external_pre_mediation_next_step_str():
+    class Row:
+        stage = "receive"
+        raw_payload = {"next_step": "3"}
+
+    assert asyncio.run(resolve_subject_stage(_FakeDB(Row()), "ext:790")) == "pre_mediation"
 
 
 # ---- IP→用户名绑定 ----

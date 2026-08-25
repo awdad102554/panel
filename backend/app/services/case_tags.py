@@ -14,9 +14,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.internal_case import InternalCaseTracking
 from app.models.user_ip import UserIpBinding
+from app.services.internal_case_urgency import is_pre_mediation
 
 SUBJECT_EXT_PREFIX = "ext:"
 SUBJECT_VIRT_PREFIX = "virt:"
+
+# 案前调解是「收件」环节的子状态(next_step=3),记事环节单独记为 pre_mediation,
+# 前端显示为「收件审查 · 案前调解」,与纯收件(receive)区分。
+PRE_MEDIATION_STAGE = "pre_mediation"
 
 
 def subject_key_for_external(external_case_id: str) -> str:
@@ -33,7 +38,8 @@ async def resolve_subject_stage(db: AsyncSession, subject_key: str) -> str:
     """解析 subject_key,校验对应案件存在,返回该案件当前环节(stage 字符串)。
 
     环节用于给新记事打「所在环节」标记:
-    - ext:{case_id} → 内网快照当前 stage(reserve/receive/handle);
+    - ext:{case_id} → 内网快照当前 stage(reserve/receive/handle),
+      其中收件且 next_step=3(案前调解)细化为 "pre_mediation";
     - virt:{id}    → 固定 "virtual"(预登记,不在主库快照)。
     案件不存在抛 LookupError(调用方转 404);subject_key 非法抛 ValueError(转 400)。
     注意:db 是 panel 的 PG 会话(读快照),不是 MySQL 会话。
@@ -51,6 +57,8 @@ async def resolve_subject_stage(db: AsyncSession, subject_key: str) -> str:
         ).scalar_one_or_none()
         if row is None:
             raise LookupError("内网案件不存在")
+        if is_pre_mediation(row):
+            return PRE_MEDIATION_STAGE
         stage = row.stage
         return stage.value if hasattr(stage, "value") else str(stage)
 

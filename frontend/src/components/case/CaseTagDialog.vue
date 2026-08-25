@@ -16,6 +16,7 @@ const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void }>();
 const STAGE_LABELS: Record<string, string> = {
   reserve: "线上预约",
   receive: "收件审查",
+  pre_mediation: "收件审查 · 案前调解",
   handle: "立案在办",
   virtual: "预登记",
 };

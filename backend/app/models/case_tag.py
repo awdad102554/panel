@@ -23,7 +23,7 @@ class CaseTag(MysqlBase):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     subject_key: Mapped[str] = mapped_column(String(80), index=True)  # ext:xxx / virt:xxx
     content: Mapped[str] = mapped_column(Text)  # 记事内容(用户填写)
-    stage: Mapped[str] = mapped_column(String(16))  # 记录时案件所在环节(reserve/receive/handle/virtual)
+    stage: Mapped[str] = mapped_column(String(16))  # 记录时案件所在环节(reserve/receive/pre_mediation/handle/virtual)
     operator: Mapped[str] = mapped_column(String(64), default="")  # 操作人(IP→用户名)
     client_ip: Mapped[str] = mapped_column(String(45), default="")  # 设备IP(客户端 IP,IPv6 最长 45)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)  # 时间(UTC)
