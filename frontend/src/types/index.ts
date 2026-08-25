@@ -157,6 +157,10 @@ export interface YearStats {
   year: number;
   filed: number;
   closed: number;
+  mediated: number;
+  withdrawn: number;
+  final: number;
+  closing_rate: number;
   mediation_rate: number;
   mediation_withdrawal_rate: number;
   final_ruling_rate: number;
@@ -176,6 +180,10 @@ export interface YearlyStats {
   year: number;
   filed: number;
   closed: number;
+  mediated: number;
+  withdrawn: number;
+  final: number;
+  closing_rate: number;
   mediation_rate: number;
   mediation_withdrawal_rate: number;
   final_ruling_rate: number;

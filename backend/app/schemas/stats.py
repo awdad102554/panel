@@ -33,6 +33,10 @@ class YearStats(BaseModel):
     year: int
     filed: int = 0  # 立案数(handle_at 落在该年)
     closed: int = 0  # 结案数(end_at 落在该年)
+    mediated: int = 0  # 调解结案数(调撤率的分子之一)
+    withdrawn: int = 0  # 撤回结案数(调撤率的分子之一)
+    final: int = 0  # 一裁终局数(部分终局+一裁终局)
+    closing_rate: float = 0  # 结案率 = 结案数/立案数
     mediation_rate: float = 0  # 该年调解率(调解结案/有结案方式的结案)
     mediation_withdrawal_rate: float = 0  # 调撤率 = (调解+撤回)/有结案方式的结案
     final_ruling_rate: float = 0  # 一裁终局率 = (部分终局+一裁终局)/裁决结案数
@@ -56,6 +60,10 @@ class YearlyStatsOut(BaseModel):
     year: int
     filed: int = 0  # 该年立案数
     closed: int = 0  # 该年结案数
+    mediated: int = 0  # 调解结案数
+    withdrawn: int = 0  # 撤回结案数
+    final: int = 0  # 一裁终局数
+    closing_rate: float = 0  # 结案率 = 结案数/立案数
     mediation_rate: float = 0  # 该年调解率
     mediation_withdrawal_rate: float = 0  # 调撤率 = (调解+撤回)/有结案方式的结案
     final_ruling_rate: float = 0  # 一裁终局率 = (部分终局+一裁终局)/裁决结案数

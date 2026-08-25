@@ -153,15 +153,22 @@ def _to_year_stats(year: int, agg: dict | None) -> YearStats:
     durations = agg.get("durations") or []
     with_end_way = agg.get("with_end_way", 0)
     ruled = agg.get("ruled", 0)
+    filed = agg.get("filed", 0)
+    closed = agg.get("closed", 0)
+    mediated = agg.get("mediated", 0)
+    withdrawn = agg.get("withdrawn", 0)
+    final = agg.get("final", 0)
     return YearStats(
         year=year,
-        filed=agg.get("filed", 0),
-        closed=agg.get("closed", 0),
-        mediation_rate=round(agg.get("mediated", 0) / with_end_way, 4) if with_end_way else 0,
-        mediation_withdrawal_rate=round(
-            (agg.get("mediated", 0) + agg.get("withdrawn", 0)) / with_end_way, 4
-        ) if with_end_way else 0,
-        final_ruling_rate=round(agg.get("final", 0) / ruled, 4) if ruled else 0,
+        filed=filed,
+        closed=closed,
+        mediated=mediated,
+        withdrawn=withdrawn,
+        final=final,
+        closing_rate=round(closed / filed, 4) if filed else 0,
+        mediation_rate=round(mediated / with_end_way, 4) if with_end_way else 0,
+        mediation_withdrawal_rate=round((mediated + withdrawn) / with_end_way, 4) if with_end_way else 0,
+        final_ruling_rate=round(final / ruled, 4) if ruled else 0,
         avg_duration_days=round(sum(durations) / len(durations), 1) if durations else 0,
     )
 
@@ -312,6 +319,10 @@ async def get_yearly_stats(
         year=year,
         filed=base.filed,
         closed=base.closed,
+        mediated=base.mediated,
+        withdrawn=base.withdrawn,
+        final=base.final,
+        closing_rate=base.closing_rate,
         mediation_rate=base.mediation_rate,
         mediation_withdrawal_rate=base.mediation_withdrawal_rate,
         final_ruling_rate=base.final_ruling_rate,

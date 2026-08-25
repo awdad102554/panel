@@ -125,20 +125,24 @@ onBeforeUnmount(() => {
               <span class="year-kpi-label">立案</span>
             </div>
             <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.closed }}</span>
+              <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.closed }}<span class="year-kpi-unit">件</span></span>
+              <span class="year-kpi-rate">结案率 {{ formatRate(yearly.stat_year.closing_rate) }}</span>
               <span class="year-kpi-label">结案</span>
             </div>
             <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.stat_year.mediation_rate) }}</span>
-              <span class="year-kpi-label">调解率</span>
+              <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.mediated }}<span class="year-kpi-unit">件</span></span>
+              <span class="year-kpi-rate">调解率 {{ formatRate(yearly.stat_year.mediation_rate) }}</span>
+              <span class="year-kpi-label">调解</span>
             </div>
             <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.stat_year.mediation_withdrawal_rate) }}</span>
-              <span class="year-kpi-label">调撤率</span>
+              <span class="year-kpi-value accent-text-green">{{ yearly.stat_year.mediated + yearly.stat_year.withdrawn }}<span class="year-kpi-unit">件</span></span>
+              <span class="year-kpi-rate">调撤率 {{ formatRate(yearly.stat_year.mediation_withdrawal_rate) }}</span>
+              <span class="year-kpi-label">调撤</span>
             </div>
             <div class="year-kpi">
-              <span class="year-kpi-value accent-text-amber">{{ formatRate(yearly.stat_year.final_ruling_rate) }}</span>
-              <span class="year-kpi-label">一裁终局率</span>
+              <span class="year-kpi-value accent-text-amber">{{ yearly.stat_year.final }}<span class="year-kpi-unit">件</span></span>
+              <span class="year-kpi-rate">一裁终局率 {{ formatRate(yearly.stat_year.final_ruling_rate) }}</span>
+              <span class="year-kpi-label">一裁终局</span>
             </div>
             <div class="year-kpi">
               <span class="year-kpi-value accent-text-amber">{{ yearly.stat_year.avg_duration_days }} 天</span>
@@ -162,20 +166,24 @@ onBeforeUnmount(() => {
               title="点击查看该年结案案件"
               @click="emit('show-cases', { title: `${selectedYear}年结案案件`, kind: 'closed_year', value: String(selectedYear) })"
             >
-              <span class="year-kpi-value accent-text-green">{{ yearly.closed }}</span>
+              <span class="year-kpi-value accent-text-green">{{ yearly.closed }}<span class="year-kpi-unit">件</span></span>
+              <span class="year-kpi-rate">结案率 {{ formatRate(yearly.closing_rate) }}</span>
               <span class="year-kpi-label">结案</span>
             </div>
             <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.mediation_rate) }}</span>
-              <span class="year-kpi-label">调解率</span>
+              <span class="year-kpi-value accent-text-green">{{ yearly.mediated }}<span class="year-kpi-unit">件</span></span>
+              <span class="year-kpi-rate">调解率 {{ formatRate(yearly.mediation_rate) }}</span>
+              <span class="year-kpi-label">调解</span>
             </div>
             <div class="year-kpi">
-              <span class="year-kpi-value accent-text-green">{{ formatRate(yearly.mediation_withdrawal_rate) }}</span>
-              <span class="year-kpi-label">调撤率</span>
+              <span class="year-kpi-value accent-text-green">{{ yearly.mediated + yearly.withdrawn }}<span class="year-kpi-unit">件</span></span>
+              <span class="year-kpi-rate">调撤率 {{ formatRate(yearly.mediation_withdrawal_rate) }}</span>
+              <span class="year-kpi-label">调撤</span>
             </div>
             <div class="year-kpi">
-              <span class="year-kpi-value accent-text-amber">{{ formatRate(yearly.final_ruling_rate) }}</span>
-              <span class="year-kpi-label">一裁终局率</span>
+              <span class="year-kpi-value accent-text-amber">{{ yearly.final }}<span class="year-kpi-unit">件</span></span>
+              <span class="year-kpi-rate">一裁终局率 {{ formatRate(yearly.final_ruling_rate) }}</span>
+              <span class="year-kpi-label">一裁终局</span>
             </div>
             <div class="year-kpi">
               <span class="year-kpi-value accent-text-amber">{{ yearly.avg_duration_days }} 天</span>
@@ -249,6 +257,18 @@ onBeforeUnmount(() => {
 }
 
 .year-kpi-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin-top: 2px;
+}
+
+.year-kpi-unit {
+  font-size: 13px;
+  font-weight: 400;
+  margin-left: 2px;
+}
+
+.year-kpi-rate {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   margin-top: 2px;
