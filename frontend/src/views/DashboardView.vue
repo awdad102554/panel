@@ -3,11 +3,11 @@ import {
   AlarmClock,
   Calendar,
   Checked,
-  ChatDotRound,
   ChatLineRound,
   CircleCheck,
   Folder,
   List,
+  Notebook,
   Stamp,
   VideoPause,
 } from "@element-plus/icons-vue";
@@ -16,6 +16,7 @@ import { computed, onMounted, ref } from "vue";
 
 import * as dashboardApi from "@/api/dashboard";
 import { getTimeLimits } from "@/api/settings";
+import CaseNotesOverviewDialog from "@/components/CaseNotesOverviewDialog.vue";
 import DashboardCharts, { type ChartCasesRequest } from "@/components/DashboardCharts.vue";
 import InternalCaseDialog from "@/components/InternalCaseDialog.vue";
 import YearlyStatsPanel from "@/components/YearlyStatsPanel.vue";
@@ -45,7 +46,7 @@ const cards = [
   { key: "pending_receive", label: "待办案件", icon: List, accent: "cyan" },
   { key: "pre_mediation", label: "案前调解", icon: ChatLineRound, accent: "cyan" },
   { key: "open_cases", label: "在办案件", icon: Folder, accent: "blue" },
-  { key: "pending_mediation", label: "待调解", icon: ChatDotRound, accent: "blue" },
+  { key: "note_cases", label: "记事本", icon: Notebook, accent: "amber" },
   { key: "heard_awaiting_decision", label: "已开庭待裁决", icon: Checked, accent: "green" },
   { key: "paused_long", label: "中止过久", icon: VideoPause, accent: "amber" },
   { key: "today_filed", label: "今日立案", icon: Stamp, accent: "green" },
@@ -71,9 +72,16 @@ const hearings = ref<HearingList | null>(null);
 // 通用案件明细弹窗(卡片与图表共用)
 const caseDialog = ref<InstanceType<typeof InternalCaseDialog>>();
 
+// 记事本总览弹窗
+const notesDialog = ref<InstanceType<typeof CaseNotesOverviewDialog>>();
+
 function openCard(key: CardKey, label: string) {
   if (key === "hearings_upcoming") {
     openHearings();
+    return;
+  }
+  if (key === "note_cases") {
+    notesDialog.value?.open();
     return;
   }
   caseDialog.value?.open(label, CARD_HINTS.value[key] ?? "", () => dashboardApi.getCardCases(key));
@@ -192,6 +200,7 @@ onMounted(async () => {
     </el-dialog>
 
     <InternalCaseDialog ref="caseDialog" />
+    <CaseNotesOverviewDialog ref="notesDialog" />
   </div>
 </template>
 

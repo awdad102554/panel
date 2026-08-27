@@ -18,7 +18,7 @@ from app.db.mysql import get_mysql_db
 from app.db.session import get_db
 from app.models.case_tag import CaseTag
 from app.models.user import User
-from app.services.case_tags import get_username_by_ip, resolve_subject_stage
+from app.services.case_tags import get_username_by_ip, resolve_subject_stage, tags_overview
 
 router = APIRouter(prefix="/case-tags", tags=["case-tags"])
 
@@ -66,6 +66,27 @@ class TagOut(BaseModel):
     def _ser_created_at(self, v: datetime) -> datetime:
         # MySQL DATETIME 读回为 naive(UTC 墙钟),补 UTC 时区,前端 new Date 才能转本地。
         return v.replace(tzinfo=timezone.utc) if v.tzinfo is None else v
+
+
+@router.get("/overview")
+async def tags_overview_endpoint(
+    days: int | None = None,
+    pg_db: AsyncSession = Depends(get_db),
+    mysql_db: AsyncSession = Depends(get_mysql_db),
+    _current_user: User = Depends(get_current_user),
+) -> dict:
+    """记事本总览:近 N 天有记事的案件(当前案号/当事人/最近一条),按最近记事倒序。
+
+    days 为空时取"时限设置"的 tag_overview_days(默认 30);案件当前案号随流转
+    自动取最新(收件转立案经快照/绑定表解析到立案案号)。
+    """
+    if days is None:
+        from app.services.time_limits import get_time_limits
+
+        days = (await get_time_limits(pg_db)).get("tag_overview_days", 30)
+    days = max(1, min(days, 365))
+    items = await tags_overview(pg_db, mysql_db, days)
+    return {"days": days, "total": len(items), "items": items}
 
 
 @router.get("/{subject_key}", response_model=list[TagOut])

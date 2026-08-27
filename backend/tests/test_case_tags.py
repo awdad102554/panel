@@ -247,3 +247,111 @@ def test_normalize_phrase_too_long_rejected():
 
 def test_normalize_phrase_max_len_ok():
     assert len(normalize_phrase("长" * 100)) == 100
+
+
+# ---- 记事本总览(近 N 天有记事的案件) ----
+
+from datetime import datetime, timedelta  # noqa: E402
+
+from app.models.case_tag import CaseTag  # noqa: E402
+from app.services.case_tags import tags_overview  # noqa: E402
+
+
+class _FakeScalars:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _FakeListResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def scalars(self):
+        return _FakeScalars(self._rows)
+
+
+class _QueueDB:
+    """按调用顺序返回预设结果的假库(适配 tags_overview 的多轮查询)。"""
+
+    def __init__(self, *results):
+        self._queue = [_FakeListResult(r) for r in results]
+
+    async def execute(self, stmt):
+        assert self._queue, "意外的额外查询"
+        return self._queue.pop(0)
+
+
+def _tag(subject_key, content, days_ago, operator="张三"):
+    t = CaseTag(subject_key=subject_key, content=content, stage="receive", operator=operator, client_ip="1.1.1.1")
+    t.created_at = datetime.utcnow() - timedelta(days=days_ago)
+    return t
+
+
+def test_tags_overview_groups_and_resolves_current_case():
+    class Row:
+        external_case_id = "100"
+        case_no = "永劳人仲案字[2026]100号"
+        stage = "handle"
+        current_step = "仲裁裁决中"
+        raw_payload = {"applicant": "张三", "respondent": "某公司"}
+
+    mysql_db = _QueueDB(
+        [_tag("ext:100", "已电话联系", 3), _tag("ext:100", "对方同意调解", 1), _tag("ext:gone", "旧案件记事", 2)],
+    )
+    # PG 查询序列:1) 快照批量 2) 缺失案件查绑定(空)
+    pg_db = _QueueDB([Row()], [])
+
+    items = asyncio.run(tags_overview(pg_db, mysql_db, 30))
+    assert len(items) == 2
+    # 最近记事倒序:ext:gone(2 天前)应在 ext:100(1 天前)之后?不——1 天前更新,排前
+    first = items[0]
+    assert first["subject_key"] == "ext:100"
+    assert first["case_no"] == "永劳人仲案字[2026]100号"
+    assert first["applicant"] == "张三"
+    assert first["respondent"] == "某公司"
+    assert first["stage"] == "deciding"  # current_step=仲裁裁决中
+    assert first["tag_count"] == 2
+    assert first["last_content"] == "对方同意调解"
+    assert first["exists"] is True
+
+    gone = items[1]
+    assert gone["subject_key"] == "ext:gone"
+    assert gone["exists"] is False
+    assert gone["case_no"] is None
+
+
+def test_tags_overview_bound_receive_shows_handle_case_no():
+    """案前调解收件(ext:200)已立案但记事未转移:经绑定表解析到立案案号。"""
+
+    class Binding:
+        receive_external_case_id = "200"
+        handle_external_case_id = "300"
+
+    class HandleRow:
+        external_case_id = "300"
+        case_no = "永劳人仲案字[2026]300号"
+        stage = "handle"
+        current_step = None
+        is_paused = False
+        raw_payload = {"applicant": "李四", "respondent": "某厂"}
+
+    mysql_db = _QueueDB([_tag("ext:200", "调解中", 1)])
+    # PG 查询序列:1) 快照(无 200) 2) 绑定(200→300) 3) handle 行
+    pg_db = _QueueDB([], [Binding()], [HandleRow()])
+
+    items = asyncio.run(tags_overview(pg_db, mysql_db, 30))
+    assert len(items) == 1
+    assert items[0]["case_no"] == "永劳人仲案字[2026]300号"
+    assert items[0]["applicant"] == "李四"
+    assert items[0]["exists"] is True
+
+
+def test_tags_overview_window_filters_old_tags():
+    # 10 天前的记事儿在 days=7 窗口内:MySQL 查询由 SQL 过滤,这里只验证
+    # 空结果(窗口内无记事)不报错。
+    mysql_db = _QueueDB([])
+    pg_db = _QueueDB()
+    assert asyncio.run(tags_overview(pg_db, mysql_db, 7)) == []

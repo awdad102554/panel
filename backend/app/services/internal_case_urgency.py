@@ -215,6 +215,9 @@ def _elapsed_urgency(
     剩余<0 超期、≤紧急阈值 紧急、≤临近阈值 临近、否则正常。
     环节的法定时限(收件 5 天、预约 3 天)只决定超期点,不决定警告起点——
     否则新案件一进来剩 5 天就会被误标"临近"(2026-08-06 修正的口径错位)。
+    注意:无原生倒计时的兜底估算刻意用"估算时限=临近阈值",让时限不明的案件
+    一进来就落在临近档引起注意(见 test_handle_fallback_without_native_limit),
+    不要再把临近阈值往小钳。
     """
     elapsed = (today - _as_date(row.phase_entered_at)).days
     remaining = limit_days - elapsed

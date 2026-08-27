@@ -9,6 +9,8 @@ subject_key 是记事归属线程的统一键:
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -146,3 +148,182 @@ async def bind_username(mysql_db: AsyncSession, ip: str, username: str) -> UserI
     await mysql_db.commit()
     await mysql_db.refresh(row)
     return row
+
+
+# ---------------------------------------------------------------- 记事本总览
+
+
+async def _resolve_ext_cases(db: AsyncSession, ext_ids: list[str]) -> dict[str, dict]:
+    """批量解析内网案件当前信息(案号/当事人/环节)。
+
+    收件转立案有两种形态:
+    - 同一 case_id 延续(普通流转):快照里 ext_id 直接就是最新记录;
+    - 案前调解立案另建新 case_id:靠 pre_mediation_bindings 映射到 handle 记录,
+      未转移成功的旧记事也显示立案后的当前案号。
+    快照和绑定都找不到(内网已删除)时不进结果,调用方按"案件已删除"展示。
+    """
+    out: dict[str, dict] = {}
+    if not ext_ids:
+        return out
+
+    rows = (
+        await db.execute(
+            select(InternalCaseTracking).where(
+                InternalCaseTracking.external_case_id.in_(ext_ids)
+            )
+        )
+    ).scalars().all()
+    for row in rows:
+        out[row.external_case_id] = _ext_info(row)
+
+    missing = [i for i in ext_ids if i not in out]
+    if missing:
+        from app.models.pre_mediation_binding import PreMediationBinding
+
+        bindings = (
+            await db.execute(
+                select(PreMediationBinding).where(
+                    PreMediationBinding.receive_external_case_id.in_(missing)
+                )
+            )
+        ).scalars().all()
+        handle_ids = [b.handle_external_case_id for b in bindings]
+        handle_rows = {}
+        if handle_ids:
+            for row in (
+                await db.execute(
+                    select(InternalCaseTracking).where(
+                        InternalCaseTracking.external_case_id.in_(handle_ids)
+                    )
+                )
+            ).scalars().all():
+                handle_rows[row.external_case_id] = row
+        for b in bindings:
+            handle_row = handle_rows.get(b.handle_external_case_id)
+            if handle_row is not None:
+                out[b.receive_external_case_id] = _ext_info(handle_row)
+    return out
+
+
+def _ext_info(row: InternalCaseTracking) -> dict:
+    """快照行 → 总览展示信息(当前案号/当事人/环节)。"""
+    payload = row.raw_payload or {}
+    stage = row.stage
+    stage_code = stage.value if hasattr(stage, "value") else str(stage)
+    if is_pre_mediation(row):
+        stage_code = PRE_MEDIATION_STAGE
+    elif stage_code == InternalStage.HANDLE.value and row.current_step:
+        stage_code = HANDLE_STEP_TO_STAGE.get(row.current_step, stage_code)
+    return {
+        "case_no": row.case_no,
+        "applicant": payload.get("applicant") if isinstance(payload.get("applicant"), str) else None,
+        "respondent": payload.get("respondent") if isinstance(payload.get("respondent"), str) else None,
+        "stage": stage_code,
+        "exists": True,
+    }
+
+
+def _virt_info(row) -> dict:
+    """预登记案件 → 总览展示信息(收件编号作为案号)。"""
+    def _names(parties) -> str | None:
+        names = [p.get("name") for p in (parties or []) if isinstance(p, dict) and p.get("name")]
+        return "、".join(names) or None
+
+    return {
+        "case_no": row.receipt_number,
+        "applicant": _names(row.applicants),
+        "respondent": _names(row.respondents),
+        "stage": "virtual",
+        "exists": True,
+    }
+
+
+async def tags_overview(pg_db: AsyncSession, mysql_db: AsyncSession, days: int) -> list[dict]:
+    """近 N 天有记事的案件总览,按最近记事时间倒序。
+
+    数据源:MySQL case_tags(记事);案件当前信息从 PG 快照(ext)/
+    SQLite(virt)解析——收件转立案后显示当前(立案)案号。
+    返回项:{subject_key, case_no, applicant, respondent, stage, tag_count,
+    last_content, last_operator, last_at, exists}。
+    """
+    from app.models.case_tag import CaseTag
+
+    cutoff = datetime.utcnow() - timedelta(days=days)  # case_tags 存 UTC naive
+    tags = (
+        await mysql_db.execute(
+            select(CaseTag)
+            .where(CaseTag.created_at >= cutoff)
+            .order_by(CaseTag.created_at.asc(), CaseTag.id.asc())
+        )
+    ).scalars().all()
+
+    # 按线程归并:条数 + 最近一条(时间最大;同刻取 id 大者,与列表排序口径一致)
+    grouped: dict[str, dict] = {}
+    for tag in tags:
+        g = grouped.setdefault(tag.subject_key, {"count": 0, "last": None})
+        g["count"] += 1
+        g["last"] = tag  # 结果按时间正序,最后一个即最新
+
+    ext_ids = [k[len(SUBJECT_EXT_PREFIX):] for k in grouped if k.startswith(SUBJECT_EXT_PREFIX)]
+    virt_ids = [k[len(SUBJECT_VIRT_PREFIX):] for k in grouped if k.startswith(SUBJECT_VIRT_PREFIX)]
+    ext_info = await _resolve_ext_cases(pg_db, ext_ids)
+
+    virt_info: dict[str, dict] = {}
+    if virt_ids:
+        from app.db.virtual import VirtualCase, VirtualSessionLocal
+
+        async with VirtualSessionLocal() as vdb:
+            for row in (
+                await vdb.execute(select(VirtualCase).where(VirtualCase.id.in_(virt_ids)))
+            ).scalars().all():
+                virt_info[row.id] = _virt_info(row)
+
+    items: list[dict] = []
+    for subject_key, g in grouped.items():
+        last = g["last"]
+        if subject_key.startswith(SUBJECT_EXT_PREFIX):
+            info = ext_info.get(subject_key[len(SUBJECT_EXT_PREFIX):])
+        else:
+            info = virt_info.get(subject_key[len(SUBJECT_VIRT_PREFIX):])
+        if info is None:
+            info = {
+                "case_no": None,
+                "applicant": None,
+                "respondent": None,
+                "stage": "",
+                "exists": False,  # 快照/预登记里已不存在(内网删除或未同步)
+            }
+        items.append(
+            {
+                "subject_key": subject_key,
+                "case_no": info["case_no"],
+                "applicant": info["applicant"],
+                "respondent": info["respondent"],
+                "stage": info["stage"],
+                "tag_count": g["count"],
+                "last_content": last.content,
+                "last_operator": last.operator,
+                "last_at": last.created_at.strftime("%Y-%m-%dT%H:%M:%S") + "Z",
+                "exists": info["exists"],
+            }
+        )
+    items.sort(key=lambda x: x["last_at"], reverse=True)
+    return items
+
+
+async def count_tagged_cases(mysql_db: AsyncSession, days: int) -> int:
+    """近 N 天有记事的案件数(总览卡片计数;失败时调用方按 0 处理)。"""
+    from sqlalchemy import func
+
+    from app.models.case_tag import CaseTag
+
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    return int(
+        (
+            await mysql_db.execute(
+                select(func.count(func.distinct(CaseTag.subject_key))).where(
+                    CaseTag.created_at >= cutoff
+                )
+            )
+        ).scalar_one()
+    )

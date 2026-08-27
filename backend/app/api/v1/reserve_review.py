@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
@@ -42,6 +43,11 @@ from app.services import reserve_review_runner as runner
 
 router = APIRouter(prefix="/reserve-reviews", tags=["reserve-review"])
 logger = logging.getLogger(__name__)
+
+# 提交内网审核互斥锁(模块级一把,单 worker):防重检查与 preAudit 提交之间隔着
+# 网络调用,不加锁时双击/并发两请求会双双通过"未提交"检查,造成内网重复审核
+# (对照 virtual_cases.submit_to_internal 的 _SUBMIT_LOCK)。
+_DECISION_LOCK = asyncio.Lock()
 
 
 def _ndjson(obj: dict) -> str:
@@ -312,7 +318,18 @@ async def submit_decision(
 
     原子语义:内网提交失败(抛 CaseSystemError)即不落库、返回 502,前端表单保留可重试;
     已提交过(submitted_at 非空)则 409 拒绝,不可重复提交。
+    整个"防重检查 → 提交内网 → 落库"在模块级锁内执行,防双击/并发重复提交。
     """
+    async with _DECISION_LOCK:
+        return await _submit_decision(external_case_id, payload, db, current_user)
+
+
+async def _submit_decision(
+    external_case_id: str,
+    payload: ReserveReviewDecisionCreate,
+    db: AsyncSession,
+    current_user: User,
+) -> ReserveReviewDecisionOut:
     row = (
         await db.execute(
             select(InternalCaseTracking).where(
@@ -369,7 +386,7 @@ async def submit_decision(
         reject_reason=reject_reason,
         reject_detail=reject_detail,
         created_by=current_user.username,
-        submitted_at=datetime.utcnow(),
+        submitted_at=datetime.now(timezone.utc),
         submitted_by=current_user.username,
         internal_status=preaudit_payload["status"],
         internal_reason=preaudit_payload["reason"],

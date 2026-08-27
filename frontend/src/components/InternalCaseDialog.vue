@@ -130,7 +130,7 @@ function urgencyLabel(row: InternalCase) {
   if (row.urgency === "paused" || row.urgency === "paused_overdue") {
     return row.days_remaining === null ? "已中止" : `中止${row.days_remaining}天`;
   }
-  return URGENCY_META[row.urgency as InternalCaseUrgency].label;
+  return URGENCY_META[row.urgency as InternalCaseUrgency]?.label ?? row.urgency;
 }
 </script>
 
@@ -150,9 +150,9 @@ function urgencyLabel(row: InternalCase) {
       <el-table-column label="紧急度" width="120">
         <template #default="{ row }">
           <el-tag
-            :type="URGENCY_META[row.urgency as InternalCaseUrgency].tagType ?? ''"
-            :color="URGENCY_META[row.urgency as InternalCaseUrgency].color"
-            :style="URGENCY_META[row.urgency as InternalCaseUrgency].color ? 'color: #fff; border: none' : ''"
+            :type="URGENCY_META[row.urgency as InternalCaseUrgency]?.tagType ?? ''"
+            :color="URGENCY_META[row.urgency as InternalCaseUrgency]?.color"
+            :style="URGENCY_META[row.urgency as InternalCaseUrgency]?.color ? 'color: #fff; border: none' : ''"
             effect="light"
           >
             {{ urgencyLabel(row) }}

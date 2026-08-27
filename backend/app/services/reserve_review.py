@@ -436,9 +436,12 @@ def parse_result(text: str) -> dict[str, Any]:
     """
     t = (text or "").strip()
     if t.startswith("```"):
-        t = t.strip("`")
-        if t.lower().startswith("json"):
-            t = t[4:].lstrip()
+        # 只剥 markdown 围栏行(首行 ```json / 末行 ```),不用 strip("`")——
+        # 后者会把 JSON 文本首尾的合法反引号字符也剥掉。
+        t = t.split("\n", 1)[1] if "\n" in t else ""
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+        t = t.strip()
     start = t.find("{")
     end = t.rfind("}")
     if start == -1 or end < start:

@@ -411,6 +411,16 @@ async function downloadApplication(row: VirtualCase) {
 
 async function markRecorded(row: VirtualCase) {
   try {
+    // recorded 是不可逆终态(后端拒绝恢复待录入),误点无法恢复,必须确认。
+    await ElMessageBox.confirm(
+      `确认 ${row.receipt_number} 已在内网完成录入?标记后不可恢复为待录入。`,
+      "标记已录入",
+      { type: "warning", confirmButtonText: "确认标记", cancelButtonText: "取消" },
+    );
+  } catch {
+    return;
+  }
+  try {
     await api.updateVirtualCaseStatus(row.id, "recorded");
     ElMessage.success(`${row.receipt_number} 已标记为已录入内网`);
     await refresh();

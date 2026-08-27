@@ -6,7 +6,7 @@ from sqlalchemy import Boolean, Date, DateTime, Integer, String
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, utcnow
 
 
 class InternalStage(str, enum.Enum):
@@ -60,8 +60,8 @@ class InternalCaseTracking(Base):
     # 就更新为"发现变化的同步时刻"(非真实变化时刻,粒度取决于同步频率)。
     phase_entered_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict] = mapped_column(JSONB)  # 内网原始记录(含嵌套 cases 详情)
-    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    last_synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class CaseTimeLimitOverride(Base):
@@ -74,9 +74,9 @@ class CaseTimeLimitOverride(Base):
     deadline_override: Mapped[date] = mapped_column(Date)
     note: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_by: Mapped[str] = mapped_column(String(64))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
 
@@ -96,4 +96,4 @@ class SyncVerificationReport(Base):
     only_in_snapshot: Mapped[int] = mapped_column(Integer)  # 快照多出(内网全量未返回)
     # 完整差异明细:{"missing_in_snapshot": [...], "field_mismatches": [...]}
     details: Mapped[dict] = mapped_column(JSONB)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

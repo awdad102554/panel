@@ -5,7 +5,7 @@ from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, utcnow
 
 
 class ReserveAIReview(Base):
@@ -35,5 +35,5 @@ class ReserveAIReview(Base):
     model_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     case_snapshot: Mapped[dict] = mapped_column(JSONB)  # 送入 AI 的结构化摘要(供校准)
     raw_result: Mapped[dict] = mapped_column(JSONB)  # 模型原始输出(解析后的完整 JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_by: Mapped[str] = mapped_column(String(64), default="admin")

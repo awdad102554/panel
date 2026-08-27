@@ -125,13 +125,15 @@ async def fetch_hearings(
             if not isinstance(raw, dict):
                 raise CaseSystemError("hold_court_bad_record")
             # 同一排期可能在相邻月份的返回里重复出现,按内网主键去重。
+            # 记录缺 id(None)时不能判重——None 会互相"撞车",把后续无 id 记录全部误丢。
             row_id = raw.get("id")
-            if row_id in seen:
+            if row_id is not None and row_id in seen:
                 continue
             hearing = _to_hearing(raw)
             if hearing is None or not (start <= hearing.open_at.date() <= end):
                 continue
-            seen.add(row_id)
+            if row_id is not None:
+                seen.add(row_id)
             hearings.append(hearing)
     hearings.sort(key=lambda h: h.open_at)
     return hearings

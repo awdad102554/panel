@@ -6,7 +6,7 @@ from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, utcnow
 
 
 class ServiceMethod(str, enum.Enum):
@@ -34,5 +34,5 @@ class ServiceDelivery(Base):
     status: Mapped[ServiceStatus] = mapped_column(String(16), default=ServiceStatus.PENDING)
     tracking_no: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 快递单号
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )

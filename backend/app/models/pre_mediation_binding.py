@@ -5,7 +5,7 @@ from sqlalchemy import DateTime, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, utcnow
 
 
 class PreMediationBinding(Base):
@@ -31,4 +31,4 @@ class PreMediationBinding(Base):
     handle_external_case_id: Mapped[str] = mapped_column(String(64), index=True)
     # 立案案件的案号(如"明永劳人仲案字[2026]171号"),供人工核对;刚立案可能为空。
     handle_case_no: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    bound_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    bound_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

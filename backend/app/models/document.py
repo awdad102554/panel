@@ -6,7 +6,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, utcnow
 
 
 class DocumentType(str, enum.Enum):
@@ -29,4 +29,4 @@ class Document(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_by_ai: Mapped[bool] = mapped_column(default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -5,7 +5,7 @@ from sqlalchemy import DateTime, Integer, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, utcnow
 
 
 class ReserveReviewDecision(Base):
@@ -26,7 +26,7 @@ class ReserveReviewDecision(Base):
     decision: Mapped[str] = mapped_column(String(16))  # 同意 / 不同意
     reject_reason: Mapped[str | None] = mapped_column(String(256), nullable=True)  # 不同意理由(8 选 1)
     reject_detail: Mapped[str | None] = mapped_column(Text, nullable=True)  # 请补正/其他 的补充说明
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     created_by: Mapped[str] = mapped_column(String(64), default="admin")
     # 提交内网留痕:确认「审核结果」后 POST preAudit 成功即写回;为空表示尚未提交(仍可重试)。
     submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

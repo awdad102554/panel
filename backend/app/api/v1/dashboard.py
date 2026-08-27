@@ -40,7 +40,7 @@ from app.services.internal_case_urgency import (
 )
 from app.services.internal_hearing import fetch_hearings, upcoming_range
 from app.services.pre_mediation_binding import load_bound_receive_ids
-from app.services.time_limits import effective_settings
+from app.services.time_limits import effective_settings, get_time_limits
 from app.api.v1.virtual_cases import list_pending_virtual_cases
 from app.db.virtual import VirtualCase
 
@@ -182,14 +182,15 @@ def _duration_bucket(days: int) -> str:
 
 # 一裁终局口径:end_way_detail 里"部分终局/一裁终局"都算终局(工作人员 2026-08-25 确认)。
 _FINAL_RULING_DETAILS = {"部分终局", "一裁终局"}
-# 统计年度边界:12月10日~次年12月10日为一个统计年度,标签用结束年。
+# 统计年度边界:上一年12月11日~当年12月10日为一个统计年度(12月10日为年末截止日,
+# 含当天),标签用结束年。
 _STAT_MONTH = 12
 _STAT_DAY = 10
 
 
 def _stat_year(d: date) -> int:
-    """统计年度标签(结束年):2026年度 = 2025-12-10 ~ 2026-12-10。"""
-    return d.year + 1 if (d.month, d.day) >= (_STAT_MONTH, _STAT_DAY) else d.year
+    """统计年度标签(结束年):2026年度 = 2025-12-11 ~ 2026-12-10(含 12月10日当天)。"""
+    return d.year + 1 if (d.month, d.day) > (_STAT_MONTH, _STAT_DAY) else d.year
 
 
 def _is_final_ruling(detail) -> bool:
@@ -379,6 +380,20 @@ async def _snapshot_stats(db: AsyncSession) -> dict[str, int] | None:
     return stats
 
 
+async def _note_cases_count(db: AsyncSession) -> int:
+    """近 N 天(时限设置 tag_overview_days)有记事的案件数;MySQL 不可用按 0,不拖垮总览。"""
+    from app.db.mysql import MysqlSessionLocal
+    from app.services.case_tags import count_tagged_cases
+
+    try:
+        days = (await get_time_limits(db))["tag_overview_days"]
+        async with MysqlSessionLocal() as mdb:
+            return await count_tagged_cases(mdb, days)
+    except Exception as exc:
+        logger.warning("记事本总览计数获取失败: %s", exc)
+        return 0
+
+
 @router.get("/summary", response_model=DashboardSummary)
 async def get_dashboard_summary(
     db: AsyncSession = Depends(get_db),
@@ -388,6 +403,7 @@ async def get_dashboard_summary(
 
     卡片全部来自内网同步快照(internal_case_trackings,口径见 _snapshot_stats),
     开庭场次实时取内网庭审日历;快照为空时回退本地 Case 聚合(模拟数据)。
+    记事本卡片计数来自 MySQL case_tags(近 tag_overview_days 天有记事的案件)。
     """
 
     snapshot = await _snapshot_stats(db)
@@ -395,10 +411,13 @@ async def get_dashboard_summary(
         return DashboardSummary(
             source="internal",
             hearings_upcoming=await _upcoming_hearing_count(),
+            note_cases=await _note_cases_count(db),
             **snapshot,
         )
 
-    return await _local_summary(db)
+    local = await _local_summary(db)
+    local.note_cases = await _note_cases_count(db)
+    return local
 
 
 @router.get("/hearings", response_model=HearingListOut)

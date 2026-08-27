@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -106,7 +106,7 @@ async def confirm_ai_output(
     if ai_output is None or ai_output.case_id != case_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AI 输出不存在")
 
-    ai_output.confirmed_at = datetime.utcnow()
+    ai_output.confirmed_at = datetime.now(timezone.utc)
     ai_output.confirmed_by = current_user.display_name
     await add_timeline_event(
         db,

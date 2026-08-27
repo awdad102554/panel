@@ -111,6 +111,8 @@ export interface DashboardSummary {
   paused_long: number;
   today_filed: number;
   today_closed: number;
+  /** 记事本:近"记事本总览天数"(时限设置,默认 30 天)内有记事的案件数 */
+  note_cases: number;
   /** 数据来源:internal = 内网案件系统真实数据,local = 本地模拟/空数据回退 */
   source: "internal" | "local";
 }

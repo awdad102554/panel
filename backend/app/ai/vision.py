@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import asyncio
 import logging
 import os
 import shutil
@@ -135,14 +136,21 @@ async def fetch_material_images(
         if not content:
             continue
 
+        # 大小限制对 PDF 同样生效:超大文件既撑爆内存,也让 gs 栅格化拖死进程。
+        if len(content) > max_image_bytes:
+            logger.warning("材料文件过大已跳过 %s (%d bytes)", path, len(content))
+            continue
+
         if path.lower().endswith(".pdf"):
-            for uri in pdf_to_png_data_uris(content, dpi=dpi, max_pages=max_pdf_pages):
+            # subprocess.run 是阻塞调用,挪到线程池,避免卡住事件循环(此前一张
+            # PDF 最坏阻塞整个进程 60 秒,期间所有 API/后台同步停摆)。
+            uris = await asyncio.to_thread(
+                pdf_to_png_data_uris, content, dpi=dpi, max_pages=max_pdf_pages
+            )
+            for uri in uris:
                 parts.append({"label": label, "data_uri": uri, "mime": "image/png"})
             continue
 
-        if len(content) > max_image_bytes:
-            logger.warning("材料图片过大已跳过 %s (%d bytes)", path, len(content))
-            continue
         mime = _guess_mime(path, resp.headers.get("content-type"))
         parts.append(
             {

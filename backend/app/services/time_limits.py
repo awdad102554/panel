@@ -60,6 +60,9 @@ TIME_LIMIT_SPECS: dict[str, TimeLimitSpec] = {
     "virtual_case_urgent_days": TimeLimitSpec(
         "预登记紧急阈值", 60, "预登记案件登记超过此天数未录入内网升级为\"紧急\"(需大于预登记临近阈值)", 2, 365
     ),
+    "tag_overview_days": TimeLimitSpec(
+        "记事本总览天数", 30, "总览\"记事本\"卡片及点开后默认统计近多少天内有记事的案件", 1, 365
+    ),
 }
 
 _cache: tuple[float, dict[str, int]] | None = None

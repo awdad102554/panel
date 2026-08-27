@@ -5,7 +5,7 @@ from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.db.base import Base
+from app.db.base import Base, utcnow
 
 
 class CaseTimelineEvent(Base):
@@ -18,4 +18,4 @@ class CaseTimelineEvent(Base):
     event_type: Mapped[str] = mapped_column(String(32))  # e.g. status_change / call / ai_output / note
     summary: Mapped[str] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)

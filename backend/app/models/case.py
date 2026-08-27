@@ -6,7 +6,7 @@ from sqlalchemy import Date, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.db.base import Base
+from app.db.base import Base, utcnow
 
 
 class CaseStatus(str, enum.Enum):
@@ -50,9 +50,9 @@ class Case(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
     )
 
     parties: Mapped[list["Party"]] = relationship(back_populates="case", cascade="all, delete-orphan")

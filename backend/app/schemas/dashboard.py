@@ -18,6 +18,7 @@ class DashboardSummary(BaseModel):
     paused_long: int = 0  # 中止过久:审理中止超过阈值的案件数
     today_filed: int = 0  # 今日立案:内网 handle_at 为今日的案件数
     today_closed: int = 0  # 今日结案:已结案/已归档且 end_at 为今日的案件数
+    note_cases: int = 0  # 记事本:近 tag_overview_days 天内有记事的案件数
 
     # 数据来源:"internal" = 内网案件系统,"local" = 本地 Case 表回退。
     source: str = "local"
