@@ -26,6 +26,18 @@ from app.services.internal_case_urgency import (
 SUBJECT_EXT_PREFIX = "ext:"
 SUBJECT_VIRT_PREFIX = "virt:"
 
+MAX_PHRASE_LEN = 100
+
+
+def normalize_phrase(content: str) -> str:
+    """校验并规范化快捷内容:去首尾空白;空/超长抛 ValueError(调用方转 422)。"""
+    text = (content or "").strip()
+    if not text:
+        raise ValueError("快捷内容不能为空")
+    if len(text) > MAX_PHRASE_LEN:
+        raise ValueError(f"快捷内容过长(最多 {MAX_PHRASE_LEN} 字)")
+    return text
+
 # 案前调解是「收件」环节的子状态(next_step=3),记事环节单独记为 pre_mediation,
 # 前端显示为「收件审查 · 案前调解」,与纯收件(receive)区分。
 PRE_MEDIATION_STAGE = "pre_mediation"

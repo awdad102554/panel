@@ -5,6 +5,7 @@ from app.api.v1 import (
     ai_models,
     auth,
     case_portrait,
+    case_tag_phrases,
     case_tags,
     cases,
     dashboard,
@@ -30,6 +31,7 @@ api_router.include_router(ai.router)
 api_router.include_router(ai_models.router)
 api_router.include_router(internal_cases.router)
 api_router.include_router(case_tags.router)
+api_router.include_router(case_tag_phrases.router)
 api_router.include_router(user_bindings.router)
 api_router.include_router(reserve_review.router)
 api_router.include_router(documents.router)

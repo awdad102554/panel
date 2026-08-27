@@ -56,7 +56,7 @@ async def get_mysql_db() -> AsyncSession:
 async def init_mysql_db() -> None:
     """启动时幂等建 MySQL 共享表(IF NOT EXISTS 语义)。"""
     # 懒导入模型,确保它们已注册进 MysqlBase.metadata(模块级导入会造成循环依赖)。
-    from app.models.case_tag import CaseTag  # noqa: F401
+    from app.models.case_tag import CaseTag, CaseTagPhrase  # noqa: F401
     from app.models.user_ip import UserIpBinding  # noqa: F401
 
     async with mysql_engine.begin() as conn:

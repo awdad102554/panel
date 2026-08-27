@@ -9,6 +9,7 @@ from app.models.user_ip import UserIpBinding
 from app.services.case_tags import (
     bind_username,
     get_username_by_ip,
+    normalize_phrase,
     resolve_subject_stage,
     subject_key_for_external,
     subject_key_for_virtual,
@@ -225,3 +226,24 @@ def test_bind_username_updates_existing():
     assert row.username == "新名"
     assert db.added == []
     assert db.committed == 1
+
+
+# ---- 快捷内容校验 ----
+
+
+def test_normalize_phrase_strips_whitespace():
+    assert normalize_phrase("  已电话联系申请人  ") == "已电话联系申请人"
+
+
+def test_normalize_phrase_empty_rejected():
+    with pytest.raises(ValueError):
+        normalize_phrase("   ")
+
+
+def test_normalize_phrase_too_long_rejected():
+    with pytest.raises(ValueError):
+        normalize_phrase("长" * 101)
+
+
+def test_normalize_phrase_max_len_ok():
+    assert len(normalize_phrase("长" * 100)) == 100

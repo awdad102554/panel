@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ElMessage } from "element-plus";
+import { Plus } from "@element-plus/icons-vue";
 import { ref, watch } from "vue";
 
 import * as caseTagApi from "@/api/caseTag";
-import type { CaseTag } from "@/api/caseTag";
+import type { CaseTag, CaseTagPhrase } from "@/api/caseTag";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -34,6 +35,12 @@ const loading = ref(false);
 const content = ref("");
 const saving = ref(false);
 
+// 快捷内容(所有用户共享,与 InfoWeb 同一张表)
+const phrases = ref<CaseTagPhrase[]>([]);
+const phraseInputVisible = ref(false);
+const newPhrase = ref("");
+const phraseSaving = ref(false);
+
 function stageLabel(stage: string): string {
   return STAGE_LABELS[stage] ?? stage;
 }
@@ -54,6 +61,45 @@ async function load() {
     ElMessage.error("记事本加载失败,请稍后重试");
   } finally {
     loading.value = false;
+  }
+}
+
+async function loadPhrases() {
+  try {
+    phrases.value = await caseTagApi.listCaseTagPhrases();
+  } catch {
+    // 快捷内容加载失败不阻断记事本本体
+  }
+}
+
+// 点击快捷内容填入输入框(可继续编辑,不直接保存)
+function applyPhrase(p: CaseTagPhrase) {
+  content.value = content.value ? content.value + p.content : p.content;
+}
+
+async function addPhrase() {
+  const text = newPhrase.value.trim();
+  if (!text) return;
+  phraseSaving.value = true;
+  try {
+    await caseTagApi.createCaseTagPhrase(text);
+    newPhrase.value = "";
+    phraseInputVisible.value = false;
+    await loadPhrases();
+  } catch (err) {
+    const status = (err as { response?: { status?: number } })?.response?.status;
+    ElMessage.error(status === 409 ? "请先在右上角设置用户名" : "快捷内容保存失败,请稍后重试");
+  } finally {
+    phraseSaving.value = false;
+  }
+}
+
+async function removePhrase(p: CaseTagPhrase) {
+  try {
+    await caseTagApi.deleteCaseTagPhrase(p.id);
+    await loadPhrases();
+  } catch {
+    ElMessage.error("快捷内容删除失败,请稍后重试");
   }
 }
 
@@ -78,7 +124,10 @@ watch(
   (v) => {
     if (v) {
       content.value = "";
+      phraseInputVisible.value = false;
+      newPhrase.value = "";
       load();
+      loadPhrases();
     }
   },
 );
@@ -105,6 +154,42 @@ watch(
     </div>
 
     <div class="tag-add">
+      <div class="phrase-row">
+        <el-tag
+          v-for="p in phrases"
+          :key="p.id"
+          class="phrase-chip"
+          effect="plain"
+          closable
+          :disable-transitions="true"
+          :title="`点击填入输入框 · 由 ${p.operator || '未知'} 添加`"
+          @click="applyPhrase(p)"
+          @close="removePhrase(p)"
+        >
+          {{ p.content }}
+        </el-tag>
+        <el-button
+          class="phrase-add-btn"
+          circle
+          size="small"
+          title="添加快捷内容(所有用户共享)"
+          @click="phraseInputVisible = !phraseInputVisible"
+        >
+          <el-icon><Plus /></el-icon>
+        </el-button>
+      </div>
+      <div v-if="phraseInputVisible" class="phrase-input-row">
+        <el-input
+          v-model="newPhrase"
+          size="small"
+          maxlength="100"
+          placeholder="输入快捷内容,添加后所有用户共享可点选"
+          @keyup.enter="addPhrase"
+        />
+        <el-button size="small" type="primary" :loading="phraseSaving" :disabled="!newPhrase.trim()" @click="addPhrase">
+          添加
+        </el-button>
+      </div>
       <el-input
         v-model="content"
         type="textarea"
@@ -178,5 +263,34 @@ watch(
 .tag-add {
   display: flex;
   flex-direction: column;
+}
+
+.phrase-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.phrase-chip {
+  cursor: pointer;
+  max-width: 320px;
+}
+
+.phrase-chip :deep(.el-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.phrase-add-btn {
+  flex-shrink: 0;
+}
+
+.phrase-input-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 </style>
