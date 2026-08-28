@@ -8,6 +8,7 @@ from app.api.v1 import (
     case_tag_phrases,
     case_tags,
     cases,
+    company_agents,
     dashboard,
     documents,
     internal_cases,
@@ -40,3 +41,4 @@ api_router.include_router(stats.router)
 api_router.include_router(settings.router)
 api_router.include_router(virtual_cases.router)
 api_router.include_router(tianyancha.router)
+api_router.include_router(company_agents.router)

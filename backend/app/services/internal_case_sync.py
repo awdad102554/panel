@@ -555,7 +555,68 @@ async def _sync_internal_cases(
                 CaseTimeLimitOverride.external_case_id.in_(deleted_ids)
             )
         )
+        # 同步清理企业代理人绑定（避免孤儿行累积）
+        from app.models.company_agent import CompanyAgentBinding
+        await db.execute(
+            delete(CompanyAgentBinding).where(
+                CompanyAgentBinding.external_case_id.in_(deleted_ids)
+            )
+        )
         logger.info("清理内网已删除案件的快照: %d 件 %s", len(deleted_ids), deleted_ids)
+
+    # 企业代理人数据库增量更新:仅对新增/更新的 handle 阶段案件提取绑定。
+    # 全量同步时跳过（初始化阶段已完成，且调用详情接口慢），只在轻量同步时提取。
+    # 单独 try 隔离:更新失败只记 warning,不影响同步主流程。
+    if not full:  # 只在轻量同步时提取代理人
+        try:
+            from app.services.company_agents import extract_and_upsert_bindings
+
+            # 收集本次新增/更新的快照行（从 merged 中提取对应的 InternalCaseTracking 对象）
+            # 变更检测：只在新增、阶段变化、或业务字段（当事人/current_step）变化时提取，
+            # 避免 closing_time_limit 倒计时导致每天全量重提取
+            updated_rows = []
+            for ext_id in merged.keys():
+                prev = existing.get(ext_id)
+                current_payload = merged[ext_id]["raw_payload"]
+
+                # 新增案件：必须提取
+                if prev is None:
+                    temp_row = InternalCaseTracking(
+                        external_case_id=ext_id,
+                        stage=merged[ext_id]["stage"],
+                        case_no=merged[ext_id]["case_no"],
+                        raw_payload=current_payload,
+                    )
+                    updated_rows.append(temp_row)
+                    continue
+
+                # 已存在案件：检查业务字段是否变化
+                prev_payload = prev.raw_payload or {}
+
+                # 业务字段：当事人数组、current_step（环节变化可能涉及代理人变更）
+                business_changed = (
+                    prev_payload.get("applicant_arr") != current_payload.get("applicant_arr") or
+                    prev_payload.get("respondent_arr") != current_payload.get("respondent_arr") or
+                    prev_payload.get("current_step") != current_payload.get("current_step")
+                )
+
+                if business_changed:
+                    temp_row = InternalCaseTracking(
+                        external_case_id=ext_id,
+                        stage=merged[ext_id]["stage"],
+                        case_no=merged[ext_id]["case_no"],
+                        raw_payload=current_payload,
+                    )
+                    updated_rows.append(temp_row)
+
+            if updated_rows:
+                agent_inserted, agent_updated = await extract_and_upsert_bindings(db, updated_rows)
+                if agent_inserted or agent_updated:
+                    counts["company_agents_inserted"] = agent_inserted
+                    counts["company_agents_updated"] = agent_updated
+                    logger.info("企业代理人数据库更新完成:新增 %d,更新 %d", agent_inserted, agent_updated)
+        except Exception:
+            logger.exception("企业代理人数据库更新异常,跳过本轮")
 
     logger.info("内网案件同步(%s):抓取 %s,合并落库 %d 条", "全量" if full else "轻量", counts, len(rows))
     return counts

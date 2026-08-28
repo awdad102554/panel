@@ -62,6 +62,7 @@ onMounted(async () => {
           </el-menu-item>
           <el-menu-item index="/virtual-cases">预登记案件</el-menu-item>
           <el-menu-item index="/tianyancha">天眼查</el-menu-item>
+          <el-menu-item index="/company-agents">企业委托代理人</el-menu-item>
           <el-menu-item index="/stats">统计分析</el-menu-item>
           <el-menu-item index="/time-limits">时限设置</el-menu-item>
           <el-menu-item index="/models">模型管理</el-menu-item>

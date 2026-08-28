@@ -54,6 +54,11 @@ const router = createRouter({
           name: "tianyancha",
           component: () => import("@/views/TianyanchaView.vue"),
         },
+        {
+          path: "company-agents",
+          name: "company-agents",
+          component: () => import("@/views/CompanyAgentView.vue"),
+        },
       ],
     },
     {
