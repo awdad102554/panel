@@ -370,6 +370,11 @@ async def _submit_decision(
         await decision_submit.submit_decision_to_internal(
             int(reserve_row_id), decision, reject_reason, reject_detail
         )
+    except ValueError as exc:
+        # reason 超内网长度上限:422 提示精简明细(表单保留)。
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
     except CaseSystemError as exc:
         logger.warning("预约审核提交内网失败 %s: %s", external_case_id, exc)
         raise HTTPException(

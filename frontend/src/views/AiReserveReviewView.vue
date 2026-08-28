@@ -511,12 +511,15 @@ onMounted(loadPending);
                 v-model="decisionForm.rejectDetail"
                 type="textarea"
                 :rows="3"
-                maxlength="500"
+                maxlength="252"
                 show-word-limit
                 placeholder="请填写具体信息"
                 class="reason-detail"
                 :disabled="isSubmitted"
               />
+              <div v-if="needsDetail" class="reason-detail-hint">
+                内网理由总长上限 255 字（含"理由:"前缀 3 字，明细最多 252 字），AI 预填内容超限时请精简。
+              </div>
             </template>
 
             <div class="decision-actions">
@@ -1070,6 +1073,12 @@ onMounted(loadPending);
 
 .reason-detail {
   margin-top: 12px;
+}
+
+.reason-detail-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 
 .decision-actions {

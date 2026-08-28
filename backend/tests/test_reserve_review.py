@@ -298,6 +298,26 @@ def test_parse_result_fallback_also_flips_on_offline_hint():
     assert r["reject_reason"] == "其他"
 
 
+def test_prompt_contains_reason_length_limit():
+    # 提示词必须写明内网 reason 255 字上限与明细精简要求(2026-08-28 内网实测校验)。
+    assert "255" in rr.RESERVE_REVIEW_SYSTEM_PROMPT
+    assert "250 字以内" in rr.RESERVE_REVIEW_SYSTEM_PROMPT
+
+
+def test_prompt_license_single_side_suffices():
+    # 被申请人营业执照只要求"有登记信息的一面",不得把另一面未上传当缺项(2026-08-28 业务口径)。
+    assert "只需上传有登记信息的一面" in rr.RESERVE_REVIEW_SYSTEM_PROMPT
+    assert "只提供一面证照图片属正常" in rr.VISION_INSTRUCTIONS
+
+
+def test_prompt_offline_first_and_no_upload_wording():
+    # 补正默认优先引导线下当面提交;线下指引的明细不得要求申请人"上传/重新上传"
+    # (2026-08-28 业务口径:引导线下后线上补传无意义)。
+    assert "默认优先 b 类线下提交" in rr.RESERVE_REVIEW_SYSTEM_PROMPT
+    assert "不得要求申请人" in rr.RESERVE_REVIEW_SYSTEM_PROMPT
+    assert "上传/重新上传/在线补正" in rr.RESERVE_REVIEW_SYSTEM_PROMPT
+
+
 def test_collect_material_images_card_photos():
     imgs = rr.collect_material_images(_DETAIL)
     by_label = {i["label"]: i["path"] for i in imgs}

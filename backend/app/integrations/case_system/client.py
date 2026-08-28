@@ -141,6 +141,9 @@ class CaseSystemClient:
     async def post(self, path: str, **kwargs) -> httpx.Response:
         return await self.request("POST", path, **kwargs)
 
+    async def put(self, path: str, **kwargs) -> httpx.Response:
+        return await self.request("PUT", path, **kwargs)
+
 
 _client_instance: CaseSystemClient | None = None
 

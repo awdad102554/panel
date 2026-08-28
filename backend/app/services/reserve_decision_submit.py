@@ -1,11 +1,14 @@
 """预约「审核结果」提交内网(preAudit)。
 
 把工作人员确认的「同意/不同意 + 8 选 1 理由 + 补充说明」组装成内网预约审核请求体,
-POST 到 `/v1/api/admin/arb/{reserve_row_id}/reserve/preAudit`,成功后落库留痕(见端点)。
+PUT 到 `/v1/api/admin/arb/{reserve_row_id}/reserve/preAudit`,成功后落库留痕(见端点)。
 
 内网请求体(工作人员点击审核后产生的真实样例,2026-08):
-    POST /v1/api/admin/arb/{reserve_row_id}/reserve/preAudit
+    PUT /v1/api/admin/arb/{reserve_row_id}/reserve/preAudit
     {"reason": "其他:1.…；2.…；…", "status": 2}
+
+注意方法是 PUT 不是 POST:2026-08-28 实测内网(Symfony)对该路由只支持 PUT,
+POST 返回 405 "Supported methods: PUT"(早期抓包样例误记为 POST,已修正)。
 
 口径(与用户确认):
 - 同意(通过)      → {"reason": "", "status": 1}(内网无通过样本,reason 留空)。
@@ -28,6 +31,10 @@ from app.schemas.reserve_review import REJECT_REASONS_NEED_DETAIL
 logger = logging.getLogger(__name__)
 
 PREAUDIT_PATH = "/v1/api/admin/arb/{reserve_row_id}/reserve/preAudit"
+
+# 内网 reason 字段长度上限(2026-08-28 实测:"reason 长度不能大于 255 个字符")。
+# 超限会被内网 422 拒绝,故提交前先本地校验,给调用方明确的精简提示。
+MAX_REASON_LEN = 255
 
 
 def compose_preaudit_payload(
@@ -60,9 +67,14 @@ async def submit_decision_to_internal(
     不伪造成功——提交失败即不落库,前端表单保留可重试。
     """
     payload = compose_preaudit_payload(decision, reject_reason, reject_detail)
+    if len(payload["reason"]) > MAX_REASON_LEN:
+        raise ValueError(
+            f"理由+明细共 {len(payload['reason'])} 字，超过内网 {MAX_REASON_LEN} 字上限，请精简明细后重试"
+        )
     client = get_case_system_client()
     path = PREAUDIT_PATH.format(reserve_row_id=reserve_row_id)
-    resp = await client.post(path, json=payload)
+    # 内网该路由只支持 PUT(POST 返回 405,2026-08-28 实测)。
+    resp = await client.put(path, json=payload)
     if resp.status_code != 200:
         raise CaseSystemError(f"preAudit http_{resp.status_code}")
     try:

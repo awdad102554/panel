@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 
 from app.models.ai_model import AIModelConfig
@@ -14,6 +16,12 @@ from app.models.ai_model import AIModelConfig
 
 class LLMCallError(Exception):
     """模型调用失败(网络不可达 / 认证失败 / 响应异常),上层捕获后转「审查失败」结论。"""
+
+
+# 可重试的状态码:429 限流/过载、5xx 服务端瞬时故障(2026-08-28 kimi 429 过载实测)。
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+# 每次重试前的等待秒数(指数退避);最多重试 len 次。
+_RETRY_DELAYS = (5.0, 15.0)
 
 
 def _http_error_detail(resp: httpx.Response) -> str:
@@ -58,17 +66,27 @@ async def chat_completion(
     if config.max_tokens is not None:
         payload["max_tokens"] = config.max_tokens
 
-    try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            resp.raise_for_status()
-            body = resp.json()
-    except httpx.HTTPStatusError as exc:
-        raise LLMCallError(
-            f"模型接口返回 {exc.response.status_code}: {_http_error_detail(exc.response)}"
-        ) from exc
-    except (httpx.HTTPError, ValueError) as exc:
-        raise LLMCallError(f"模型调用失败: {exc}") from exc
+    # 429/5xx 退避重试:瞬时过载自动等几秒再试,重试耗尽才报失败。
+    body: dict | None = None
+    for attempt in range(len(_RETRY_DELAYS) + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                body = resp.json()
+            break
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in _RETRYABLE_STATUS and attempt < len(_RETRY_DELAYS):
+                await asyncio.sleep(_RETRY_DELAYS[attempt])
+                continue
+            raise LLMCallError(
+                f"模型接口返回 {exc.response.status_code}: {_http_error_detail(exc.response)}"
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise LLMCallError(f"模型调用失败: {exc}") from exc
+
+    if body is None:  # 理论上不可达(break 前必赋值),防御
+        raise LLMCallError("模型调用失败: 无响应")
 
     choices = body.get("choices") or []
     if not choices:
