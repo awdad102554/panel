@@ -37,7 +37,14 @@ RESERVE_REVIEW_SYSTEM_PROMPT = """你是劳动人事争议仲裁委员会的预�
 
 # 审核结果归类(映射到系统「同意/不同意」口径,必须归类到 8 条理由之一)
 - decision 取「同意」当且仅当结论为「通过」;否则取「不同意」。
-- 结论为「补正」时,reject_reason 选「请补正」,并在 reject_detail 里写清需补正的具体内容(给申请人看)。
+- 结论为「补正」时,按补正方式二选一(绝大多数属于后者,务必判准):
+  a. 申请人可在 3 天内**在线补正/修改后重新提交**的(缺项少、可线上上传解决),
+     reject_reason 选「请补正」,reject_detail 写清需补正的具体内容(给申请人看);
+  b. 需要申请人**携带书面材料到仲裁院当面提交**的(材料缺项较多、需核验原件或
+     提交书面材料),reject_reason 一律选「其他」——不得选「请补正」;
+     reject_detail 逐条写清需补齐/修改的内容,末尾补固定收尾:
+     「材料齐全的情况下，劳动仲裁申请书、申请人身份证复印件、被申请人营业执照信息、
+     证据目录、具体的证据等所有书面材料一式三份，由本人向永安市劳动人事争议仲裁院当面提交」。
 - 结论为「驳回」时,reject_reason 从下面 1-6 中选最贴合的一条原文;都不贴合才选「其他」并在 reject_detail 写具体原因。
 - 不同意理由(8 选 1,须输出原文):
   1. 您的预申请不属于劳动人事争议仲裁委受案范围
@@ -51,9 +58,6 @@ RESERVE_REVIEW_SYSTEM_PROMPT = """你是劳动人事争议仲裁委员会的预�
 - reject_detail 仅在 reject_reason 为「请补正」或「其他」时填写;其余理由填 null。
 - reject_detail 须写成「1.xxx；2.xxx；3.xxx；…」的逐条编号清单（中文分号分隔、不换行），
   每条都具体可执行（写明"缺哪个月工资 / 缺哪个证件 / 缺哪份材料"），不泛泛而谈，语气写给申请人看、通俗直接。
-- 若材料缺项较多需引导线下提交，清单末尾补固定收尾：
-  「材料齐全的情况下，劳动仲裁申请书、申请人身份证复印件、被申请人营业执照信息、证据目录、
-  具体的证据等所有书面材料一式三份，由本人向永安市劳动人事争议仲裁院当面提交」。
 
 # 输出格式(只输出 JSON,不要其他内容)
 {
@@ -113,6 +117,11 @@ def failure_result(reason: str) -> dict[str, Any]:
     }
 
 
+# reject_detail 含"当面提交"(引导线下提交书面材料的固定收尾)时,归类必须是「其他」,
+# 不能是「请补正」(2026-08-28 业务口径:线上可补正的才用「请补正」)。
+_OFFLINE_SUBMIT_MARKER = "当面提交"
+
+
 def _normalize_decision(
     obj: dict[str, Any], conclusion: str
 ) -> tuple[str | None, str | None, str | None]:
@@ -120,6 +129,8 @@ def _normalize_decision(
 
     decision 由结论确定性派生(通过→同意,否则→不同意),不信任模型可能自相矛盾的 decision 字段;
     理由漏给/给错时兜底:补正→请补正;驳回→其他。
+    补正的 reject_detail 含"当面提交"(线下提交指引)时强制归「其他」——
+    模型按提示词应自行判对,这里是它判错时的确定性兜底。
     """
     decision = "同意" if conclusion == "通过" else "不同意"
     if decision == "同意":
@@ -133,6 +144,17 @@ def _normalize_decision(
     if reject_reason in REJECT_REASONS_NEED_DETAIL:
         detail = _str(obj.get("reject_detail")).strip()
         reject_detail = detail or None
+
+    # 线下当面提交指引不属于「请补正」(可在线补正),改归「其他」;
+    # detail 从模型原文保留(请补正→其他后 detail 依然需要)。
+    if (
+        conclusion == "补正"
+        and reject_reason == "请补正"
+        and reject_detail
+        and _OFFLINE_SUBMIT_MARKER in reject_detail
+    ):
+        reject_reason = "其他"
+
     return decision, reject_reason, reject_detail
 
 

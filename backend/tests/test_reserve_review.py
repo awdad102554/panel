@@ -265,6 +265,39 @@ def test_parse_result_decision_ignores_contradictory_decision_field():
     assert r["reject_detail"] is None
 
 
+def test_parse_result_offline_submit_forces_other():
+    # 补正指引含"当面提交"(线下提交固定收尾)→ 归类「其他」而非「请补正」
+    # (2026-08-28 业务口径:可在线补正才用「请补正」)。
+    text = (
+        '{"conclusion":"补正","reason":"x","reject_reason":"请补正",'
+        '"reject_detail":"1.缺2025年12月工资流水；2.缺劳动合同；'
+        '材料齐全的情况下，劳动仲裁申请书、申请人身份证复印件等一式三份，'
+        '由本人向永安市劳动人事争议仲裁院当面提交"}'
+    )
+    r = rr.parse_result(text)
+    assert r["decision"] == "不同意"
+    assert r["reject_reason"] == "其他"
+    assert "当面提交" in r["reject_detail"]
+
+
+def test_parse_result_online_supplement_stays_buzheng():
+    # 可在线补正的(无"当面提交"指引)仍为「请补正」。
+    r = rr.parse_result(
+        '{"conclusion":"补正","reason":"x","reject_reason":"请补正",'
+        '"reject_detail":"1.补充2025年12月工资流水并重新上传"}'
+    )
+    assert r["reject_reason"] == "请补正"
+
+
+def test_parse_result_fallback_also_flips_on_offline_hint():
+    # 模型漏给 reject_reason 兜底「请补正」后,detail 含当面提交指引同样改归「其他」。
+    r = rr.parse_result(
+        '{"conclusion":"补正","reason":"x",'
+        '"reject_detail":"1.缺劳动合同原件；由本人向永安市劳动人事争议仲裁院当面提交"}'
+    )
+    assert r["reject_reason"] == "其他"
+
+
 def test_collect_material_images_card_photos():
     imgs = rr.collect_material_images(_DETAIL)
     by_label = {i["label"]: i["path"] for i in imgs}
